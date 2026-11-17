@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: buildfree
+      POSTGRES_PASSWORD: buildfree
+      POSTGRES_DB: buildfree
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+
+  storage:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: buildfree
+      MINIO_ROOT_PASSWORD: buildfree123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - filedata:/data
+
+volumes:
+  dbdata:
+  filedata:

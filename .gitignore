@@ -1,0 +1,12 @@
+# .NET build output
+bin/
+obj/
+
+# Visual Studio / editor files
+.vs/
+.vscode/
+*.user
+
+# Secrets and local settings
+appsettings.Development.json
+.env

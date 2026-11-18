@@ -30,6 +30,44 @@ call() {
 
 field() { echo "$BODY" | jq -r "$1"; }
 
+# upload PATH TOKEN EXPECTED_STATUS FILE... : sends files as the "photos" form field
+upload() {
+  local path="$1" token="$2" expected="$3"; shift 3
+  local args=(-s -o /tmp/smoke_body -w "%{http_code}" -X POST "$API$path" -H "Authorization: Bearer $token")
+  for f in "$@"; do args+=(-F "photos=@$f"); done
+  local status
+  status="$(curl "${args[@]}")"
+  BODY="$(cat /tmp/smoke_body)"
+  if [[ "$status" != "$expected" ]]; then
+    echo "FAIL: POST $path (upload) returned $status, expected $expected"
+    echo "      body: $BODY"
+    exit 1
+  fi
+  PASS=$((PASS + 1))
+  echo "ok   POST $path (upload $# file(s)) -> $status"
+}
+
+# getfile PATH TOKEN EXPECTED_STATUS : downloads to /tmp/smoke_file, sets CTYPE
+getfile() {
+  local path="$1" token="$2" expected="$3" out
+  out="$(curl -s -o /tmp/smoke_file -w "%{http_code} %{content_type}" "$API$path" -H "Authorization: Bearer $token")"
+  CTYPE="${out#* }"
+  if [[ "${out%% *}" != "$expected" ]]; then
+    echo "FAIL: GET $path returned ${out%% *}, expected $expected"
+    exit 1
+  fi
+  PASS=$((PASS + 1))
+  echo "ok   GET $path (file) -> ${out%% *}"
+}
+
+# Test files: a real 1x1 PNG, a tiny JPEG header, and a text file pretending to be a photo.
+PNG=/tmp/smoke_photo.png
+JPG=/tmp/smoke_photo.jpg
+FAKE=/tmp/smoke_fake.jpg
+echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > "$PNG"
+printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9' > "$JPG"
+echo "this is not a photo" > "$FAKE"
+
 echo "== Sign up and log in"
 call POST /api/auth/signup "" "{\"companyName\":\"Alpha Builders\",\"name\":\"Ana\",\"email\":\"alpha$RUN@example.com\",\"password\":\"changeme123\"}" 200
 A="$(field .token)"
@@ -68,6 +106,26 @@ call PUT "/api/logs/$LOG" "$A" '{"notes":"Demo finished, dumpster swapped","crew
 call GET "/api/projects/$JOB/logs" "$A" "" 200
 [[ "$(field 'length')" == "1" && "$(field '.[0].crewCount')" == "4" ]] || { echo "FAIL: log list wrong"; exit 1; }
 
+echo "== Photos on daily logs"
+upload "/api/logs/$LOG/photos" "$A" 201 "$PNG" "$JPG"
+[[ "$(field 'length')" == "2" && "$(field '.[0].contentType')" == "image/png" && "$(field '.[1].contentType')" == "image/jpeg" ]] || { echo "FAIL: upload response wrong"; exit 1; }
+[[ "$(field '.[0].storageKey')" == "null" ]] || { echo "FAIL: storage key leaked to the browser"; exit 1; }
+PHOTO="$(field '.[0].id')"
+PHOTO2="$(field '.[1].id')"
+upload "/api/logs/$LOG/photos" "$A" 400 "$FAKE"
+call POST "/api/logs/$LOG/photos" "$A" '{"photos":[]}' 400
+call GET "/api/logs/$LOG/photos" "$A" "" 200
+[[ "$(field 'length')" == "2" ]] || { echo "FAIL: log photo list wrong"; exit 1; }
+call GET "/api/projects/$JOB/photos" "$A" "" 200
+[[ "$(field 'length')" == "2" ]] || { echo "FAIL: job photo list wrong"; exit 1; }
+getfile "/api/photos/$PHOTO" "$A" 200
+[[ "$CTYPE" == image/png* ]] || { echo "FAIL: photo served as $CTYPE"; exit 1; }
+cmp -s /tmp/smoke_file "$PNG" || { echo "FAIL: photo bytes changed"; exit 1; }
+call PUT "/api/photos/$PHOTO" "$A" '{"caption":"Kitchen after demo"}' 200
+[[ "$(field .caption)" == "Kitchen after demo" ]] || { echo "FAIL: caption not saved"; exit 1; }
+call DELETE "/api/photos/$PHOTO2" "$A" "" 204
+getfile "/api/photos/$PHOTO2" "$A" 404
+
 echo "== To-dos"
 call POST "/api/projects/$JOB/todos" "$A" '{"title":"Order cabinets","dueDate":"2026-12-05"}' 201
 TODO="$(field .id)"
@@ -91,20 +149,33 @@ call DELETE "/api/projects/$JOB" "$B" "" 404
 call DELETE "/api/clients/$CLIENT" "$B" "" 404
 call DELETE "/api/logs/$LOG" "$B" "" 404
 call DELETE "/api/todos/$TODO" "$B" "" 404
+getfile "/api/photos/$PHOTO" "$B" 404
+call GET "/api/projects/$JOB/photos" "$B" "" 200
+[[ "$(field 'length')" == "0" ]] || { echo "FAIL: company B can see company A's photos"; exit 1; }
+call GET "/api/logs/$LOG/photos" "$B" "" 200
+[[ "$(field 'length')" == "0" ]] || { echo "FAIL: company B can see company A's log photos"; exit 1; }
+upload "/api/logs/$LOG/photos" "$B" 404 "$PNG"
+call PUT "/api/photos/$PHOTO" "$B" '{"caption":"Hacked"}' 404
+call DELETE "/api/photos/$PHOTO" "$B" "" 404
 
 echo "== Deleting"
 call DELETE "/api/todos/$TODO" "$A" "" 204
 call DELETE "/api/logs/$LOG" "$A" "" 204
+getfile "/api/photos/$PHOTO" "$A" 404
 call DELETE "/api/clients/$CLIENT" "$A" "" 204
 call GET "/api/projects/$JOB" "$A" "" 200
 [[ "$(field .clientId)" == "null" ]] || { echo "FAIL: job still points at deleted client"; exit 1; }
 call POST "/api/projects/$JOB/logs" "$A" '{"notes":"Second log"}' 201
+LOG2="$(field .id)"
+upload "/api/logs/$LOG2/photos" "$A" 201 "$PNG"
+PHOTO3="$(field '.[0].id')"
 call POST "/api/projects/$JOB/todos" "$A" '{"title":"Second to-do"}' 201
 call DELETE "/api/projects/$JOB" "$A" "" 204
 call GET "/api/projects/$JOB/logs" "$A" "" 200
 [[ "$(field 'length')" == "0" ]] || { echo "FAIL: logs left behind after job delete"; exit 1; }
 call GET /api/todos "$A" "" 200
 [[ "$(field 'length')" == "0" ]] || { echo "FAIL: to-dos left behind after job delete"; exit 1; }
+getfile "/api/photos/$PHOTO3" "$A" 404
 
 echo
 echo "All $PASS checks passed."

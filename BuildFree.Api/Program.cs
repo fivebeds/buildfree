@@ -35,6 +35,13 @@ builder.Services
     });
 builder.Services.AddAuthorization();
 
+// Job-site photos are saved as files (see PhotoStore.cs). Set Photos:Path to
+// choose the folder; by default it's "photo-uploads" next to the API.
+var photosPath = builder.Configuration["Photos:Path"];
+if (string.IsNullOrWhiteSpace(photosPath))
+    photosPath = Path.Combine(builder.Environment.ContentRootPath, "photo-uploads");
+builder.Services.AddSingleton<IPhotoStore>(new DiskPhotoStore(photosPath));
+
 // Lets a frontend on another port call the API while developing.
 builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
@@ -54,6 +61,13 @@ using (var scope = app.Services.CreateScope())
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Photo limits. The web app shrinks photos before uploading, so real uploads
+// are far below these.
+const int MaxPhotosPerUpload = 10;
+const int MaxPhotosPerLog = 30;
+const long MaxPhotoBytes = 10L * 1024 * 1024;       // 10 MB per photo
+const long MaxUploadBytes = 50L * 1024 * 1024;      // 50 MB per upload
 
 string MakeToken(User u)
 {
@@ -85,6 +99,36 @@ static bool LooksLikeEmail(string? s)
 {
     if (s is null || s.Length > 254) return false;
     return MailAddress.TryCreate(s, out var parsed) && parsed.Address == s;
+}
+
+// Works out the image type from the first bytes of the file instead of
+// trusting the file name, so only real photos are accepted.
+static string? DetectImageType(ReadOnlySpan<byte> b)
+{
+    if (b.Length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpeg";
+    if (b.Length >= 8 && b[..8].SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A })) return "image/png";
+    if (b.Length >= 6 && (b[..6].SequenceEqual("GIF87a"u8) || b[..6].SequenceEqual("GIF89a"u8))) return "image/gif";
+    if (b.Length >= 12 && b[..4].SequenceEqual("RIFF"u8) && b[8..12].SequenceEqual("WEBP"u8)) return "image/webp";
+    return null;
+}
+
+// Keeps only the file name part (no folders) and a sensible length.
+static string SafeFileName(string? name)
+{
+    var clean = Clean(Path.GetFileName(name ?? ""));
+    if (clean is null) return "photo";
+    return clean.Length > 200 ? clean[..200] : clean;
+}
+
+// Removes photo files after their database rows are gone. A file that fails
+// to delete is only wasted space, so it never fails the request.
+static async Task DeletePhotoFiles(IEnumerable<LogPhoto> photos, IPhotoStore store, ILogger logger)
+{
+    foreach (var photo in photos)
+    {
+        try { await store.DeleteAsync(photo.StorageKey); }
+        catch (Exception ex) { logger.LogWarning(ex, "Could not delete photo file {Key}", photo.StorageKey); }
+    }
 }
 
 // Shared checks for creating and editing clients and projects.
@@ -263,16 +307,19 @@ projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal 
     return Results.Ok(project);
 });
 
-// Deleting a job also deletes its daily logs and to-dos.
-projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+// Deleting a job also deletes its daily logs, their photos and its to-dos.
+projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
 {
     var accountId = AccountId(me);
     var project = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
     if (project is null) return Results.NotFound();
+    var photos = await db.Photos.Where(p => p.ProjectId == id && p.AccountId == accountId).ToListAsync();
+    db.Photos.RemoveRange(photos);
     db.Logs.RemoveRange(await db.Logs.Where(l => l.ProjectId == id && l.AccountId == accountId).ToListAsync());
     db.Todos.RemoveRange(await db.Todos.Where(t => t.ProjectId == id && t.AccountId == accountId).ToListAsync());
     db.Projects.Remove(project);
     await db.SaveChangesAsync();
+    await DeletePhotoFiles(photos, store, logger);
     return Results.NoContent();
 });
 
@@ -340,13 +387,143 @@ logs.MapPut("/{id:guid}", async (Guid id, LogRequest r, ClaimsPrincipal me, AppD
     return Results.Ok(log);
 });
 
-logs.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+// Deleting a log also deletes its photos.
+logs.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
 {
     var accountId = AccountId(me);
     var log = await db.Logs.FirstOrDefaultAsync(l => l.Id == id && l.AccountId == accountId);
     if (log is null) return Results.NotFound();
+    var photos = await db.Photos.Where(p => p.LogId == id && p.AccountId == accountId).ToListAsync();
+    db.Photos.RemoveRange(photos);
     db.Logs.Remove(log);
     await db.SaveChangesAsync();
+    await DeletePhotoFiles(photos, store, logger);
+    return Results.NoContent();
+});
+
+// ---------- Photos on daily logs ----------
+
+// Every photo on a job, newest first (the web app groups them by log).
+projects.MapGet("/{id:guid}/photos", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    return await db.Photos.Where(p => p.ProjectId == id && p.AccountId == accountId)
+        .OrderByDescending(p => p.CreatedAt).ToListAsync();
+});
+
+logs.MapGet("/{id:guid}/photos", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    return await db.Photos.Where(p => p.LogId == id && p.AccountId == accountId)
+        .OrderBy(p => p.CreatedAt).ToListAsync();
+});
+
+// Upload one or more photos to a log as multipart/form-data: each file in a
+// field named "photos", plus an optional "caption" for all of them.
+logs.MapPost("/{id:guid}/photos", async (Guid id, HttpRequest req, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
+{
+    var accountId = AccountId(me);
+    var log = await db.Logs.FirstOrDefaultAsync(l => l.Id == id && l.AccountId == accountId);
+    if (log is null) return Results.NotFound();
+    if (!req.HasFormContentType) return Bad("Send photos as a form upload in a field named \"photos\".");
+
+    var form = await req.ReadFormAsync();
+    var files = form.Files.GetFiles("photos");
+    if (files.Count == 0) return Bad("Choose at least one photo.");
+    if (files.Count > MaxPhotosPerUpload) return Bad($"Upload up to {MaxPhotosPerUpload} photos at a time.");
+    var already = await db.Photos.CountAsync(p => p.LogId == id && p.AccountId == accountId);
+    if (already + files.Count > MaxPhotosPerLog) return Bad($"A daily log can hold up to {MaxPhotosPerLog} photos.");
+    var caption = Clean(form["caption"]);
+    if (TooLong(caption, 500)) return Bad("Caption is too long.");
+
+    // Check every file before saving any, so an upload either fully works or changes nothing.
+    var accepted = new List<(IFormFile File, string Type)>();
+    long total = 0;
+    foreach (var file in files)
+    {
+        var name = SafeFileName(file.FileName);
+        if (file.Length == 0) return Bad($"\"{name}\" is empty.");
+        if (file.Length > MaxPhotoBytes) return Bad($"\"{name}\" is larger than 10 MB.");
+        total += file.Length;
+        var head = new byte[12];
+        int read;
+        await using (var peek = file.OpenReadStream())
+            read = await peek.ReadAtLeastAsync(head, head.Length, throwOnEndOfStream: false);
+        var type = DetectImageType(head.AsSpan(0, read));
+        if (type is null) return Bad($"\"{name}\" isn't a JPEG, PNG, GIF or WebP photo.");
+        accepted.Add((file, type));
+    }
+    if (total > MaxUploadBytes) return Bad("That upload is too large. Try fewer photos at a time.");
+
+    var author = me.FindFirstValue("name") ?? "Unknown";
+    var saved = new List<LogPhoto>();
+    try
+    {
+        foreach (var (file, type) in accepted)
+        {
+            var photo = new LogPhoto
+            {
+                AccountId = accountId,
+                ProjectId = log.ProjectId,
+                LogId = log.Id,
+                FileName = SafeFileName(file.FileName),
+                ContentType = type,
+                SizeBytes = file.Length,
+                Caption = caption,
+                UploadedBy = author
+            };
+            photo.StorageKey = $"{accountId}/{photo.Id}";
+            await using (var content = file.OpenReadStream())
+                await store.SaveAsync(photo.StorageKey, content);
+            saved.Add(photo);
+        }
+        db.Photos.AddRange(saved);
+        await db.SaveChangesAsync();
+    }
+    catch
+    {
+        // Don't leave orphan files behind if anything failed part way.
+        await DeletePhotoFiles(saved, store, logger);
+        throw;
+    }
+    return Results.Created($"/api/logs/{log.Id}/photos", saved);
+}).WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxUploadBytes + 1024 * 1024));
+
+var photoRoutes = app.MapGroup("/api/photos").RequireAuthorization();
+
+// The image itself. Only the company that owns the photo can load it.
+photoRoutes.MapGet("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, HttpResponse res) =>
+{
+    var accountId = AccountId(me);
+    var photo = await db.Photos.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
+    if (photo is null) return Results.NotFound();
+    var stream = await store.OpenAsync(photo.StorageKey);
+    if (stream is null) return Results.NotFound();
+    res.Headers.CacheControl = "private, max-age=86400";
+    res.Headers.XContentTypeOptions = "nosniff";
+    return Results.Stream(stream, photo.ContentType);
+});
+
+photoRoutes.MapPut("/{id:guid}", async (Guid id, PhotoRequest r, ClaimsPrincipal me, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    var photo = await db.Photos.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
+    if (photo is null) return Results.NotFound();
+    var caption = Clean(r.Caption);
+    if (TooLong(caption, 500)) return Bad("Caption is too long.");
+    photo.Caption = caption;
+    await db.SaveChangesAsync();
+    return Results.Ok(photo);
+});
+
+photoRoutes.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
+{
+    var accountId = AccountId(me);
+    var photo = await db.Photos.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
+    if (photo is null) return Results.NotFound();
+    db.Photos.Remove(photo);
+    await db.SaveChangesAsync();
+    await DeletePhotoFiles(new[] { photo }, store, logger);
     return Results.NoContent();
 });
 

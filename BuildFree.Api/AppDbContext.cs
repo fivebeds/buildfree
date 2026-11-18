@@ -10,6 +10,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Project> Projects => Set<Project>();
     public DbSet<DailyLog> Logs => Set<DailyLog>();
     public DbSet<TodoItem> Todos => Set<TodoItem>();
+    public DbSet<LogPhoto> Photos => Set<LogPhoto>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -18,5 +19,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<Project>().HasIndex(p => p.AccountId);
         b.Entity<DailyLog>().HasIndex(l => new { l.AccountId, l.ProjectId });
         b.Entity<TodoItem>().HasIndex(t => new { t.AccountId, t.ProjectId });
+        b.Entity<LogPhoto>().HasIndex(p => new { p.AccountId, p.ProjectId });
+        b.Entity<LogPhoto>().HasIndex(p => p.LogId);
     }
 }

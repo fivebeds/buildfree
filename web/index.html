@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BuildFree</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fafafa; --panel: #ffffff; --text: #171717; --muted: #666666;
+    --line: #ebebeb; --line-strong: #d4d4d4; --btn: #171717; --btn-text: #ffffff;
+    --hover: #f2f2f2; --err: #e5484d;
+    --b-plan: #0070f3; --b-active: #18a058; --b-hold: #d97706; --b-done: #8f8f8f;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000; --panel: #0a0a0a; --text: #ededed; --muted: #a1a1a1;
+      --line: #1f1f1f; --line-strong: #333333; --btn: #ededed; --btn-text: #0a0a0a;
+      --hover: #171717; --err: #ff6369;
+      --b-plan: #52a8ff; --b-active: #3ecf8e; --b-hold: #f5a524; --b-done: #8f8f8f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 "Geist", system-ui, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+  :focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  .mono { font-family: "Geist Mono", ui-monospace, Consolas, monospace; font-size: 13px; }
+
+  .top { background: var(--panel); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1000px; margin: 0 auto; padding: 0 24px; height: 56px; display: flex; align-items: center; gap: 24px; }
+  .logo { font-weight: 600; font-size: 16px; letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; }
+  .logo i { width: 0; height: 0; border-left: 9px solid transparent; border-right: 9px solid transparent; border-bottom: 16px solid var(--text); }
+  .tabs { display: flex; gap: 4px; flex: 1; }
+  .tab { background: none; border: 0; padding: 6px 12px; border-radius: 6px; color: var(--muted); cursor: pointer; }
+  .tab:hover { background: var(--hover); color: var(--text); }
+  .tab[aria-current="page"] { color: var(--text); background: var(--hover); font-weight: 500; }
+
+  main { max-width: 1000px; margin: 0 auto; padding: 40px 24px 80px; }
+  .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; gap: 16px; }
+  h1 { font-size: 28px; font-weight: 600; letter-spacing: -0.03em; margin: 0; }
+
+  .btn { background: var(--btn); color: var(--btn-text); border: 1px solid var(--btn); border-radius: 6px; padding: 8px 14px; font-weight: 500; cursor: pointer; }
+  .btn:hover { opacity: 0.88; }
+  .btn.ghost { background: transparent; color: var(--text); border-color: var(--line-strong); }
+  .btn.ghost:hover { background: var(--hover); opacity: 1; }
+  .btn[disabled] { opacity: 0.5; cursor: default; }
+
+  .list { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .row { display: grid; grid-template-columns: 2fr 1.4fr 1.6fr 100px; gap: 16px; padding: 14px 20px; align-items: center; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; }
+  .row.clients { grid-template-columns: 2fr 2fr 1.4fr auto; }
+  .row.th { color: var(--muted); font-size: 13px; padding: 10px 20px; background: var(--bg); }
+  .row b { font-weight: 500; }
+  .sub { color: var(--muted); }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+  .badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+  .empty { padding: 56px 24px; text-align: center; color: var(--muted); }
+  .empty b { display: block; color: var(--text); font-size: 16px; margin-bottom: 4px; font-weight: 500; }
+
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line-strong); border-radius: 10px; padding: 0; width: min(440px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+  .dlg { padding: 24px; display: grid; gap: 16px; }
+  .dlg h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+  label { display: grid; gap: 6px; font-weight: 500; font-size: 13px; }
+  input, select, textarea { background: var(--bg); border: 1px solid var(--line-strong); border-radius: 6px; padding: 9px 12px; width: 100%; font-weight: 400; font-size: 14px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+  .err { color: var(--err); font-size: 13px; min-height: 18px; margin: 0; }
+
+  .auth { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  .card { width: min(380px, 100%); display: grid; gap: 16px; }
+  .card h1 { font-size: 24px; }
+  .card .logo { margin-bottom: 8px; }
+  .link { background: none; border: 0; padding: 0; color: var(--muted); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+  .link:hover { color: var(--text); }
+  .link.danger:hover { color: var(--err); }
+  .tools { display: flex; gap: 12px; align-items: center; font-size: 13px; }
+  .tools .link { font-size: 13px; }
+  .entry .tools { float: right; }
+  .btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
+
+  .wide { max-width: none; }
+  .layout { display: grid; grid-template-columns: 300px 1fr; min-height: calc(100vh - 57px); }
+  .side { background: var(--panel); border-right: 1px solid var(--line); padding: 16px; display: grid; gap: 12px; align-content: start; }
+  .full { width: 100%; }
+  .jobs { display: grid; gap: 2px; }
+  .jobbtn { text-align: left; background: none; border: 0; padding: 10px 12px; border-radius: 6px; cursor: pointer; display: grid; gap: 2px; }
+  .jobbtn:hover, .jobbtn[aria-current="true"] { background: var(--hover); }
+  .jobbtn b { font-weight: 500; }
+  .jobbtn .badge { color: var(--muted); }
+  .pane { padding: 32px; max-width: 1100px; }
+  .grid2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; align-items: start; margin-top: 24px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; display: grid; gap: 14px; }
+  .panel h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .stack { display: grid; gap: 10px; }
+  .entry { border-top: 1px solid var(--line); padding-top: 12px; }
+  .entry p { margin: 4px 0 0; white-space: pre-wrap; }
+  .todo { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; font-size: 14px; }
+  .todo.done span { color: var(--muted); text-decoration: line-through; }
+  .todorow { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+  .x { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
+  .x:hover { color: var(--err); background: var(--hover); }
+  .headtools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .inline { display: flex; gap: 8px; }
+  .inline input { flex: 1; min-width: 0; }
+  .group { margin-top: 28px; }
+  .group h2 { font-size: 13px; color: var(--muted); font-weight: 500; margin: 0 0 8px; }
+  .group h2.late { color: var(--err); }
+  @media (max-width: 720px) { .layout, .grid2 { grid-template-columns: 1fr; } .pane { padding: 20px; } .side { border-right: 0; border-bottom: 1px solid var(--line); } }
+  @media (max-width: 720px) {
+    .row, .row.clients { grid-template-columns: 1fr auto; row-gap: 2px; }
+    .head { flex-wrap: wrap; }
+    .row.th { display: none; }
+    .hide-sm { display: none; }
+    .bar { gap: 12px; }
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+  // Where the API is running. Change this when the API is hosted online.
+  const API = "http://localhost:5000";
+  const STATUS = [
+    { label: "Planning", color: "var(--b-plan)" },
+    { label: "Active", color: "var(--b-active)" },
+    { label: "On hold", color: "var(--b-hold)" },
+    { label: "Complete", color: "var(--b-done)" }
+  ];
+
+  const store = {
+    get() { try { return localStorage.getItem("bf_token"); } catch { return null; } },
+    set(t) { try { t ? localStorage.setItem("bf_token", t) : localStorage.removeItem("bf_token"); } catch {} }
+  };
+  let token = store.get();
+  let view = "jobs";
+  let projects = [], clients = [], todos = [];
+
+  // Small helper that builds elements safely (text is never treated as HTML).
+  function h(tag, props = {}, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k === "class") el.className = v;
+      else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+      else if (v !== false && v != null) el.setAttribute(k, v);
+    }
+    for (const kid of kids.flat()) {
+      if (kid == null || kid === false) continue;
+      el.append(kid.nodeType ? kid : document.createTextNode(kid));
+    }
+    return el;
+  }
+
+  async function api(path, method = "GET", body) {
+    let res;
+    try {
+      res = await fetch(API + path, {
+        method,
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
+        body: body ? JSON.stringify(body) : undefined
+      });
+    } catch {
+      throw new Error("Can’t reach the server. Make sure the API is running.");
+    }
+    if (res.status === 401) {
+      if (token) { logout(); throw new Error("Your session expired. Log in again."); }
+      throw new Error("Email or password is incorrect.");
+    }
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.error) || "Something went wrong (" + res.status + ").");
+    return data;
+  }
+
+  function logout() { token = null; store.set(null); projects = []; clients = []; todos = []; selected = null; render(); }
+
+  async function loadData() {
+    [projects, clients, todos] = await Promise.all([api("/api/projects"), api("/api/clients"), api("/api/todos")]);
+  }
+
+  /* ---------- Log in / sign up ---------- */
+  function authView(mode = "login") {
+    const signup = mode === "signup";
+    const err = h("p", { class: "err", role: "alert" });
+    const form = h("form", { class: "card", onsubmit: async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(form));
+      const btn = $("button[type=submit]", form);
+      btn.disabled = true; err.textContent = "";
+      try {
+        const out = await api(signup ? "/api/auth/signup" : "/api/auth/login", "POST", f);
+        token = out.token; store.set(token);
+        await loadData(); render();
+      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+    } },
+      h("div", { class: "logo" }, h("i"), "BuildFree"),
+      h("h1", {}, signup ? "Create your account" : "Log in"),
+      signup && field("Company name", "companyName"),
+      signup && field("Your name", "name", "text", "name"),
+      field("Email", "email", "email", "email"),
+      field("Password", "password", "password", signup ? "new-password" : "current-password"),
+      err,
+      h("button", { class: "btn", type: "submit" }, signup ? "Create account" : "Log in"),
+      h("button", { class: "link", type: "button", onclick: () => mount(authView(signup ? "login" : "signup")) },
+        signup ? "Already have an account? Log in" : "New here? Create an account")
+    );
+    return h("div", { class: "auth" }, form);
+  }
+  function field(text, name, type = "text", auto) {
+    return h("label", {}, text, h("input", { name, type, required: true, autocomplete: auto, minlength: type === "password" ? 8 : false }));
+  }
+  const $ = (s, el = document) => el.querySelector(s);
+
+  /* ---------- App ---------- */
+  let selected = null, logs = [], jobQuery = "";
+  const todayStr = () => new Date().toLocaleDateString("en-CA");
+  const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "";
+
+  async function refresh() {
+    await loadData();
+    logs = selected ? await api("/api/projects/" + selected + "/logs").catch(() => []) : [];
+    render();
+  }
+  async function selectJob(id) { selected = id; await refresh(); }
+
+  function appView() {
+    const tab = (id, text) => h("button", { class: "tab", "aria-current": view === id ? "page" : false, onclick: () => { view = id; render(); } }, text);
+    return h("div", {},
+      h("div", { class: "top" }, h("div", { class: "bar wide" },
+        h("div", { class: "logo" }, h("i"), "BuildFree"),
+        h("div", { class: "tabs" }, tab("jobs", "Jobs"), tab("clients", "Clients")),
+        h("button", { class: "tab", onclick: logout }, "Log out"))),
+      view === "jobs" ? jobsView() : h("main", {}, clientsView()));
+  }
+
+  function jobsView() {
+    const listEl = h("div", { class: "jobs" });
+    const fill = () => {
+      const q = jobQuery.toLowerCase();
+      const shown = projects.filter(p => (p.name + " " + (p.address || "")).toLowerCase().includes(q));
+      listEl.replaceChildren(...(shown.length ? shown.map(p => {
+        const s = STATUS[p.status] || STATUS[0];
+        return h("button", { class: "jobbtn", "aria-current": selected === p.id ? "true" : "false", onclick: () => selectJob(p.id) },
+          h("b", {}, p.name),
+          h("span", { class: "badge", style: "--c:" + s.color }, p.address ? s.label + " · " + p.address : s.label));
+      }) : [h("p", { class: "sub" }, "No jobs found.")]));
+    };
+    fill();
+    const side = h("aside", { class: "side" },
+      h("button", { class: "btn full", onclick: () => projectDialog() }, "New job"),
+      h("input", { placeholder: "Search jobs", "aria-label": "Search jobs", value: jobQuery, oninput: (e) => { jobQuery = e.target.value; fill(); } }),
+      listEl);
+    const p = projects.find(x => x.id === selected);
+    return h("div", { class: "layout" }, side, h("div", { class: "pane" }, p ? jobDetail(p) : home()));
+  }
+
+  function todoRow(t, jobLabel) {
+    return h("div", { class: "todorow" }, todoCheck(t, jobLabel),
+      h("div", { class: "tools" },
+        h("button", { class: "link", type: "button", onclick: () => todoDialog(t) }, "Edit"),
+        h("button", { class: "x", type: "button", title: "Delete to-do", "aria-label": "Delete to-do: " + t.title, onclick: () => confirmDelete("Delete this to-do?", "/api/todos/" + t.id) }, "×")));
+  }
+  function todoCheck(t, jobLabel) {
+    return h("label", { class: "todo" + (t.done ? " done" : "") },
+      h("input", { type: "checkbox", checked: t.done ? "" : false, style: "width:auto;margin-top:3px", onchange: async () => { await api("/api/todos/" + t.id + "/toggle", "POST"); await refresh(); } }),
+      h("span", {}, t.title,
+        jobLabel ? h("span", { class: "sub" }, " · " + jobLabel) : null,
+        t.dueDate ? h("span", { class: "sub" }, " · due " + fmtDate(t.dueDate)) : null));
+  }
+
+  function home() {
+    const open = todos.filter(t => !t.done), t0 = todayStr();
+    const jobName = (id) => (projects.find(p => p.id === id) || {}).name || "";
+    const group = (title, items, cls) => h("div", { class: "group" },
+      h("h2", { class: cls || "" }, title + " (" + items.length + ")"),
+      items.length ? h("div", { class: "panel" }, items.map(t => todoRow(t, jobName(t.projectId)))) : h("p", { class: "sub" }, "Nothing here."));
+    return h("div", {},
+      h("div", { class: "head" }, h("h1", {}, "Today")),
+      h("p", { class: "sub" }, projects.length ? "Pick a job on the left, or work through your to-dos below." : "Create your first job to get started."),
+      group("Past due", open.filter(t => t.dueDate && t.dueDate < t0), "late"),
+      group("Due today", open.filter(t => t.dueDate === t0)),
+      group("Upcoming and no date", open.filter(t => !t.dueDate || t.dueDate > t0)));
+  }
+
+  function jobDetail(p) {
+    const client = clients.find(c => c.id === p.clientId);
+    const mine = todos.filter(t => t.projectId === p.id);
+    const status = h("select", { "aria-label": "Status", style: "width:auto", onchange: async (e) => { await api("/api/projects/" + p.id + "/status", "PUT", { status: +e.target.value }); await refresh(); } },
+      STATUS.map((s, i) => h("option", { value: i, selected: p.status === i ? "" : false }, s.label)));
+
+    const logErr = h("p", { class: "err", role: "alert" });
+    const logForm = h("form", { class: "stack", onsubmit: async (e) => {
+      e.preventDefault(); logErr.textContent = "";
+      const f = Object.fromEntries(new FormData(logForm));
+      try { await api("/api/projects/" + p.id + "/logs", "POST", { notes: f.notes, crewCount: f.crew ? +f.crew : null, date: f.date || null }); await refresh(); }
+      catch (ex) { logErr.textContent = ex.message; }
+    } },
+      h("textarea", { name: "notes", required: true, rows: 3, placeholder: "What happened on site today?" }),
+      h("div", { class: "inline" },
+        h("input", { name: "date", type: "date", value: todayStr() }),
+        h("input", { name: "crew", type: "number", min: 0, placeholder: "Crew on site" }),
+        h("button", { class: "btn", type: "submit" }, "Add log")),
+      logErr);
+
+    const todoErr = h("p", { class: "err", role: "alert" });
+    const todoForm = h("form", { class: "inline", onsubmit: async (e) => {
+      e.preventDefault(); todoErr.textContent = "";
+      const f = Object.fromEntries(new FormData(todoForm));
+      try { await api("/api/projects/" + p.id + "/todos", "POST", { title: f.title, dueDate: f.dueDate || null }); await refresh(); }
+      catch (ex) { todoErr.textContent = ex.message; }
+    } },
+      h("input", { name: "title", required: true, placeholder: "New to-do" }),
+      h("input", { name: "dueDate", type: "date", style: "flex:0 0 140px" }),
+      h("button", { class: "btn", type: "submit" }, "Add"));
+
+    return h("div", {},
+      h("div", { class: "head" }, h("h1", {}, p.name),
+        h("div", { class: "headtools" }, status,
+          h("button", { class: "btn ghost", onclick: () => projectDialog(p) }, "Edit job"),
+          h("button", { class: "btn ghost", onclick: () => confirmDelete("Delete “" + p.name + "”? Its daily logs and to-dos are deleted too. This can’t be undone.", "/api/projects/" + p.id, () => { selected = null; }) }, "Delete"))),
+      h("p", { class: "sub" }, [p.address, client && "Client: " + client.name, p.startDate && "Start " + fmtDate(p.startDate), p.endDate && "End " + fmtDate(p.endDate)].filter(Boolean).join(" · ") || "No address or client yet"),
+      h("div", { class: "grid2" },
+        h("div", { class: "panel" }, h("h2", {}, "Daily logs"), logForm,
+          logs.length ? logs.map(l => h("div", { class: "entry" },
+            h("div", { class: "tools" },
+              h("button", { class: "link", type: "button", onclick: () => logDialog(l) }, "Edit"),
+              h("button", { class: "link danger", type: "button", onclick: () => confirmDelete("Delete this daily log?", "/api/logs/" + l.id) }, "Delete")),
+            h("b", {}, fmtDate(l.date)),
+            h("span", { class: "sub" }, " · " + l.author + (l.crewCount != null ? " · " + l.crewCount + " on site" : "")),
+            h("p", {}, l.notes))) : h("p", { class: "sub" }, "No logs yet.")),
+        h("div", { class: "panel" }, h("h2", {}, "To-dos"), todoForm, todoErr,
+          mine.length ? mine.map(t => todoRow(t)) : h("p", { class: "sub" }, "No to-dos yet."))));
+  }
+
+  function clientsView() {
+    return h("div", {},
+      h("div", { class: "head" }, h("h1", {}, "Clients"), h("button", { class: "btn", onclick: () => clientDialog() }, "Add client")),
+      clients.length === 0
+        ? h("div", { class: "list" }, h("div", { class: "empty" }, h("b", {}, "No clients yet"), "Add a client so you can attach them to projects."))
+        : h("div", { class: "list" },
+            h("div", { class: "row clients th" }, h("span", {}, "Name"), h("span", { class: "hide-sm" }, "Email"), h("span", { class: "hide-sm" }, "Phone"), h("span", {})),
+            clients.map(c => h("div", { class: "row clients" },
+              h("b", {}, c.name),
+              h("span", { class: "sub hide-sm mono" }, c.email || "No email"),
+              h("span", { class: "sub hide-sm mono" }, c.phone || "No phone"),
+              h("div", { class: "tools" },
+                h("button", { class: "link", onclick: () => clientDialog(c) }, "Edit"),
+                h("button", { class: "link danger", onclick: () => confirmDelete("Delete client “" + c.name + "”? Their jobs are kept.", "/api/clients/" + c.id) }, "Delete"))))));
+  }
+
+  /* ---------- Dialogs ---------- */
+  function dialog(title, fields, submitText, onSubmit, danger) {
+    const err = h("p", { class: "err", role: "alert" });
+    const dlg = h("dialog", {});
+    const form = h("form", { class: "dlg", method: "dialog", onsubmit: async (e) => {
+      e.preventDefault();
+      const btn = $("button[type=submit]", form); btn.disabled = true; err.textContent = "";
+      try { await onSubmit(Object.fromEntries(new FormData(form))); dlg.close(); await refresh(); }
+      catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+    } },
+      h("h2", {}, title), fields, err,
+      h("div", { class: "actions" },
+        h("button", { class: "btn ghost", type: "button", onclick: () => dlg.close() }, "Cancel"),
+        h("button", { class: danger ? "btn danger" : "btn", type: "submit" }, submitText)));
+    dlg.append(form);
+    dlg.addEventListener("close", () => dlg.remove());
+    document.body.append(dlg); dlg.showModal();
+    const first = $("input, select, textarea", form) || $("button[type=submit]", form); if (first) first.focus();
+  }
+
+  // Pass an existing job to edit it; pass nothing to create a new one.
+  function projectDialog(p) {
+    const editing = p && p.id ? p : null, v = editing || {};
+    dialog(editing ? "Edit job" : "New job", [
+      h("label", {}, "Job name", h("input", { name: "name", required: true, maxlength: 200, placeholder: "Kitchen remodel", value: v.name || "" })),
+      h("label", {}, "Address", h("input", { name: "address", maxlength: 300, placeholder: "123 Main St", value: v.address || "" })),
+      h("label", {}, "Client", h("select", { name: "clientId" },
+        h("option", { value: "" }, "No client yet"),
+        clients.map(c => h("option", { value: c.id, selected: v.clientId === c.id ? "" : false }, c.name)))),
+      h("div", { class: "inline" },
+        h("label", { style: "flex:1" }, "Start date", h("input", { name: "startDate", type: "date", value: v.startDate || "" })),
+        h("label", { style: "flex:1" }, "End date", h("input", { name: "endDate", type: "date", value: v.endDate || "" })))
+    ], editing ? "Save changes" : "Create job", async (f) => {
+      const body = { name: f.name, address: f.address || null, clientId: f.clientId || null, startDate: f.startDate || null, endDate: f.endDate || null };
+      if (editing) return api("/api/projects/" + editing.id, "PUT", body);
+      const created = await api("/api/projects", "POST", body);
+      selected = created.id;
+    });
+  }
+
+  function clientDialog(c) {
+    const editing = c && c.id ? c : null, v = editing || {};
+    dialog(editing ? "Edit client" : "Add client", [
+      h("label", {}, "Name", h("input", { name: "name", required: true, maxlength: 200, value: v.name || "" })),
+      h("label", {}, "Email", h("input", { name: "email", type: "email", value: v.email || "" })),
+      h("label", {}, "Phone", h("input", { name: "phone", type: "tel", maxlength: 40, value: v.phone || "" }))
+    ], editing ? "Save changes" : "Add client", (f) => {
+      const body = { name: f.name, email: f.email || null, phone: f.phone || null };
+      return editing ? api("/api/clients/" + editing.id, "PUT", body) : api("/api/clients", "POST", body);
+    });
+  }
+
+  function logDialog(l) {
+    const notes = h("textarea", { name: "notes", required: true, rows: 5 });
+    notes.value = l.notes;
+    dialog("Edit daily log", [
+      h("label", {}, "Notes", notes),
+      h("div", { class: "inline" },
+        h("label", { style: "flex:1" }, "Date", h("input", { name: "date", type: "date", value: l.date })),
+        h("label", { style: "flex:1" }, "Crew on site", h("input", { name: "crew", type: "number", min: 0, value: l.crewCount != null ? l.crewCount : "" })))
+    ], "Save changes", (f) => api("/api/logs/" + l.id, "PUT", { notes: f.notes, crewCount: f.crew ? +f.crew : null, date: f.date || null }));
+  }
+
+  function todoDialog(t) {
+    dialog("Edit to-do", [
+      h("label", {}, "To-do", h("input", { name: "title", required: true, maxlength: 500, value: t.title })),
+      h("label", {}, "Due date", h("input", { name: "dueDate", type: "date", value: t.dueDate || "" }))
+    ], "Save changes", (f) => api("/api/todos/" + t.id, "PUT", { title: f.title, dueDate: f.dueDate || null }));
+  }
+
+  // Asks before deleting, then calls the API and reloads.
+  function confirmDelete(message, path, after) {
+    dialog("Are you sure?", [h("p", { style: "margin:0" }, message)], "Delete", async () => {
+      await api(path, "DELETE");
+      if (after) after();
+    }, true);
+  }
+
+  /* ---------- Start ---------- */
+  function mount(node) { const root = document.getElementById("app"); root.replaceChildren(node); }
+  function render() { mount(token ? appView() : authView()); }
+
+  (async function start() {
+    if (token) { try { await loadData(); } catch { token = null; store.set(null); } }
+    render();
+  })();
+</script>
+</body>
+</html>

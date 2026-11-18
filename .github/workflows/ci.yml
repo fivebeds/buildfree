@@ -1,0 +1,56 @@
+# Runs on every pull request and every push to main: builds the API, starts it
+# against a real PostgreSQL database, and runs tests/smoke.sh against it.
+name: Build and test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: buildfree
+          POSTGRES_PASSWORD: buildfree
+          POSTGRES_DB: buildfree
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U buildfree"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build
+        run: dotnet build BuildFree.Api --configuration Release
+
+      - name: Start the API
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+          ASPNETCORE_URLS: http://localhost:5000
+        run: |
+          nohup dotnet run --project BuildFree.Api --configuration Release --no-build --no-launch-profile > api.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -s -o /dev/null http://localhost:5000/api/projects; then echo "API is up"; exit 0; fi
+            sleep 1
+          done
+          echo "API did not start:"; cat api.log; exit 1
+
+      - name: Run end-to-end checks
+        run: bash tests/smoke.sh
+
+      - name: Show API log if something failed
+        if: failure()
+        run: cat api.log || true

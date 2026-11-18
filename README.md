@@ -18,7 +18,7 @@ Estimates and proposals, change orders with client approval, a simple schedule, 
 
 ## Stack
 
-The backend is C# with ASP.NET Core Web API and Entity Framework Core. The database is PostgreSQL, with S3-compatible storage for photos (MinIO locally, Cloudflare R2 in production). The frontend starts as plain JavaScript pages calling the REST API and will move to React later. Docker Compose runs the database and storage locally.
+The backend is C# with ASP.NET Core Web API and Entity Framework Core. The database is PostgreSQL. Photo storage will use S3-compatible storage (Cloudflare R2 in production) and gets added when daily logs are built. The frontend starts as plain JavaScript pages calling the REST API and will move to React later. Docker Compose runs the database locally.
 
 ## Run locally
 
@@ -39,6 +39,10 @@ curl -X POST http://localhost:5000/api/auth/signup \
 ```
 
 That returns a token. Send it as `Authorization: Bearer <token>` to `/api/projects` and `/api/clients`.
+
+## Run the web app
+
+With the API running, open `web/index.html` in your browser. Create an account on the sign up screen, then add clients and projects. The page talks to the API at `http://localhost:5000`, which you can change at the top of the script when the API is hosted online.
 
 ## Status
 

@@ -67,11 +67,12 @@ public class TodoItem
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
-// Request shapes (what the API accepts)
-public record SignupRequest(string CompanyName, string Name, string Email, string Password);
-public record LoginRequest(string Email, string Password);
-public record ClientRequest(string Name, string? Email, string? Phone);
-public record ProjectRequest(string Name, string? Address, Guid? ClientId, DateOnly? StartDate);
+// Request shapes (what the API accepts). Strings can arrive as null when a
+// field is left out of the JSON, so the endpoints check them before use.
+public record SignupRequest(string? CompanyName, string? Name, string? Email, string? Password);
+public record LoginRequest(string? Email, string? Password);
+public record ClientRequest(string? Name, string? Email, string? Phone);
+public record ProjectRequest(string? Name, string? Address, Guid? ClientId, DateOnly? StartDate, DateOnly? EndDate = null);
 public record StatusRequest(int Status);
-public record LogRequest(string Notes, int? CrewCount, DateOnly? Date);
-public record TodoRequest(string Title, DateOnly? DueDate);
+public record LogRequest(string? Notes, int? CrewCount, DateOnly? Date);
+public record TodoRequest(string? Title, DateOnly? DueDate);

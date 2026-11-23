@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Mail;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using BuildFree.Api;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -60,6 +61,28 @@ using (var scope = app.Services.CreateScope())
 
 app.UseCors();
 app.UseAuthentication();
+
+// Every signed-in request loads the current user from the database, so a
+// removed team member is locked out right away and role changes apply
+// immediately, even though their login token is still valid.
+app.Use(async (ctx, next) =>
+{
+    if (ctx.User.Identity?.IsAuthenticated == true)
+    {
+        var db = ctx.RequestServices.GetRequiredService<AppDbContext>();
+        var user = Guid.TryParse(ctx.User.FindFirstValue("userId"), out var uid)
+            ? await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid)
+            : null;
+        if (user is null)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+        ctx.Items["me"] = user;
+    }
+    await next();
+});
+
 app.UseAuthorization();
 
 // Photo limits. The web app shrinks photos before uploading, so real uploads
@@ -85,6 +108,38 @@ string MakeToken(User u)
 }
 
 Guid AccountId(ClaimsPrincipal p) => Guid.Parse(p.FindFirstValue("accountId")!);
+
+// ---------- Team roles ----------
+
+// The signed-in user, loaded by the middleware above.
+static User Me(HttpContext ctx) => (User)ctx.Items["me"]!;
+
+static IResult Forbidden(string message) => Results.Json(new { error = message }, statusCode: StatusCodes.Status403Forbidden);
+
+// Owners and office staff can manage clients and jobs; field crew can't.
+static async ValueTask<object?> OfficeOnly(EndpointFilterInvocationContext ctx, EndpointFilterDelegate next)
+{
+    var me = ctx.HttpContext.Items["me"] as User;
+    if (me is null || me.Role == UserRole.Field)
+        return Forbidden("Only the owner or office staff can do that.");
+    return await next(ctx);
+}
+
+// Only owners can invite people, change roles or remove team members.
+static async ValueTask<object?> OwnerOnly(EndpointFilterInvocationContext ctx, EndpointFilterDelegate next)
+{
+    var me = ctx.HttpContext.Items["me"] as User;
+    if (me is null || me.Role != UserRole.Owner)
+        return Forbidden("Only the owner can manage the team.");
+    return await next(ctx);
+}
+
+// Field crew can change only what they created themselves.
+static bool CanChange(User me, Guid? createdBy) => me.Role != UserRole.Field || createdBy == me.Id;
+
+static string InviteHash(string code) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(code)));
+
+static object MemberView(User u) => new { u.Id, u.Name, u.Email, u.Role, u.CreatedAt };
 
 // ---------- Input helpers ----------
 
@@ -218,7 +273,7 @@ clients.MapPost("/", async (ClientRequest r, ClaimsPrincipal me, AppDbContext db
     db.Clients.Add(client);
     await db.SaveChangesAsync();
     return Results.Created($"/api/clients/{client.Id}", client);
-});
+}).AddEndpointFilter(OfficeOnly);
 
 clients.MapPut("/{id:guid}", async (Guid id, ClientRequest r, ClaimsPrincipal me, AppDbContext db) =>
 {
@@ -231,7 +286,7 @@ clients.MapPut("/{id:guid}", async (Guid id, ClientRequest r, ClaimsPrincipal me
     client.Phone = Clean(r.Phone);
     await db.SaveChangesAsync();
     return Results.Ok(client);
-});
+}).AddEndpointFilter(OfficeOnly);
 
 // Deleting a client keeps their jobs; the jobs just lose the client link.
 clients.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
@@ -244,7 +299,7 @@ clients.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext
     db.Clients.Remove(client);
     await db.SaveChangesAsync();
     return Results.NoContent();
-});
+}).AddEndpointFilter(OfficeOnly);
 
 // ---------- Projects ----------
 
@@ -286,7 +341,7 @@ projects.MapPost("/", async (ProjectRequest r, ClaimsPrincipal me, AppDbContext 
     db.Projects.Add(project);
     await db.SaveChangesAsync();
     return Results.Created($"/api/projects/{project.Id}", project);
-});
+}).AddEndpointFilter(OfficeOnly);
 
 projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal me, AppDbContext db) =>
 {
@@ -305,7 +360,7 @@ projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal 
     project.EndDate = r.EndDate;
     await db.SaveChangesAsync();
     return Results.Ok(project);
-});
+}).AddEndpointFilter(OfficeOnly);
 
 // Deleting a job also deletes its daily logs, their photos and its to-dos.
 projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
@@ -321,7 +376,7 @@ projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContex
     await db.SaveChangesAsync();
     await DeletePhotoFiles(photos, store, logger);
     return Results.NoContent();
-});
+}).AddEndpointFilter(OfficeOnly);
 
 // ---------- Job status, daily logs, to-dos ----------
 
@@ -334,7 +389,7 @@ projects.MapPut("/{id:guid}/status", async (Guid id, StatusRequest r, ClaimsPrin
     project.Status = (ProjectStatus)r.Status;
     await db.SaveChangesAsync();
     return Results.Ok(project);
-});
+}).AddEndpointFilter(OfficeOnly);
 
 projects.MapGet("/{id:guid}/logs", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
 {
@@ -352,7 +407,7 @@ static IResult? CheckLog(LogRequest r)
     return null;
 }
 
-projects.MapPost("/{id:guid}/logs", async (Guid id, LogRequest r, ClaimsPrincipal me, AppDbContext db) =>
+projects.MapPost("/{id:guid}/logs", async (Guid id, LogRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     if (!await db.Projects.AnyAsync(p => p.Id == id && p.AccountId == accountId))
@@ -362,7 +417,8 @@ projects.MapPost("/{id:guid}/logs", async (Guid id, LogRequest r, ClaimsPrincipa
     {
         AccountId = accountId,
         ProjectId = id,
-        Author = me.FindFirstValue("name") ?? "Unknown",
+        Author = Me(ctx).Name,
+        AuthorId = Me(ctx).Id,
         Date = r.Date ?? DateOnly.FromDateTime(DateTime.UtcNow),
         Notes = Clean(r.Notes)!,
         CrewCount = r.CrewCount
@@ -374,11 +430,12 @@ projects.MapPost("/{id:guid}/logs", async (Guid id, LogRequest r, ClaimsPrincipa
 
 var logs = app.MapGroup("/api/logs").RequireAuthorization();
 
-logs.MapPut("/{id:guid}", async (Guid id, LogRequest r, ClaimsPrincipal me, AppDbContext db) =>
+logs.MapPut("/{id:guid}", async (Guid id, LogRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var log = await db.Logs.FirstOrDefaultAsync(l => l.Id == id && l.AccountId == accountId);
     if (log is null) return Results.NotFound();
+    if (!CanChange(Me(ctx), log.AuthorId)) return Forbidden("Field crew can only edit their own daily logs.");
     if (CheckLog(r) is IResult bad) return bad;
     log.Notes = Clean(r.Notes)!;
     log.CrewCount = r.CrewCount;
@@ -388,11 +445,12 @@ logs.MapPut("/{id:guid}", async (Guid id, LogRequest r, ClaimsPrincipal me, AppD
 });
 
 // Deleting a log also deletes its photos.
-logs.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
+logs.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
 {
     var accountId = AccountId(me);
     var log = await db.Logs.FirstOrDefaultAsync(l => l.Id == id && l.AccountId == accountId);
     if (log is null) return Results.NotFound();
+    if (!CanChange(Me(ctx), log.AuthorId)) return Forbidden("Field crew can only delete their own daily logs.");
     var photos = await db.Photos.Where(p => p.LogId == id && p.AccountId == accountId).ToListAsync();
     db.Photos.RemoveRange(photos);
     db.Logs.Remove(log);
@@ -420,7 +478,7 @@ logs.MapGet("/{id:guid}/photos", async (Guid id, ClaimsPrincipal me, AppDbContex
 
 // Upload one or more photos to a log as multipart/form-data: each file in a
 // field named "photos", plus an optional "caption" for all of them.
-logs.MapPost("/{id:guid}/photos", async (Guid id, HttpRequest req, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
+logs.MapPost("/{id:guid}/photos", async (Guid id, HttpRequest req, ClaimsPrincipal me, HttpContext ctx, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
 {
     var accountId = AccountId(me);
     var log = await db.Logs.FirstOrDefaultAsync(l => l.Id == id && l.AccountId == accountId);
@@ -455,7 +513,8 @@ logs.MapPost("/{id:guid}/photos", async (Guid id, HttpRequest req, ClaimsPrincip
     }
     if (total > MaxUploadBytes) return Bad("That upload is too large. Try fewer photos at a time.");
 
-    var author = me.FindFirstValue("name") ?? "Unknown";
+    var author = Me(ctx).Name;
+    var authorId = Me(ctx).Id;
     var saved = new List<LogPhoto>();
     try
     {
@@ -470,7 +529,8 @@ logs.MapPost("/{id:guid}/photos", async (Guid id, HttpRequest req, ClaimsPrincip
                 ContentType = type,
                 SizeBytes = file.Length,
                 Caption = caption,
-                UploadedBy = author
+                UploadedBy = author,
+                UploadedById = authorId
             };
             photo.StorageKey = $"{accountId}/{photo.Id}";
             await using (var content = file.OpenReadStream())
@@ -504,11 +564,12 @@ photoRoutes.MapGet("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContex
     return Results.Stream(stream, photo.ContentType);
 });
 
-photoRoutes.MapPut("/{id:guid}", async (Guid id, PhotoRequest r, ClaimsPrincipal me, AppDbContext db) =>
+photoRoutes.MapPut("/{id:guid}", async (Guid id, PhotoRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var photo = await db.Photos.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
     if (photo is null) return Results.NotFound();
+    if (!CanChange(Me(ctx), photo.UploadedById)) return Forbidden("Field crew can only change their own photos.");
     var caption = Clean(r.Caption);
     if (TooLong(caption, 500)) return Bad("Caption is too long.");
     photo.Caption = caption;
@@ -516,11 +577,12 @@ photoRoutes.MapPut("/{id:guid}", async (Guid id, PhotoRequest r, ClaimsPrincipal
     return Results.Ok(photo);
 });
 
-photoRoutes.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
+photoRoutes.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
 {
     var accountId = AccountId(me);
     var photo = await db.Photos.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
     if (photo is null) return Results.NotFound();
+    if (!CanChange(Me(ctx), photo.UploadedById)) return Forbidden("Field crew can only delete their own photos.");
     db.Photos.Remove(photo);
     await db.SaveChangesAsync();
     await DeletePhotoFiles(new[] { photo }, store, logger);
@@ -586,6 +648,134 @@ todos.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext d
     db.Todos.Remove(todo);
     await db.SaveChangesAsync();
     return Results.NoContent();
+});
+
+// ---------- Team members ----------
+
+app.MapGet("/api/me", async (HttpContext ctx, AppDbContext db) =>
+{
+    var me = Me(ctx);
+    var company = await db.Accounts.Where(a => a.Id == me.AccountId).Select(a => a.Name).FirstOrDefaultAsync();
+    return Results.Ok(new { me.Id, me.Name, me.Email, me.Role, Company = company });
+}).RequireAuthorization();
+
+var team = app.MapGroup("/api/team").RequireAuthorization();
+
+// Everyone on the team can see who else is on it. Pending invites are listed too.
+team.MapGet("/", async (ClaimsPrincipal me, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    var members = await db.Users.Where(u => u.AccountId == accountId).OrderBy(u => u.CreatedAt).ToListAsync();
+    var invites = await db.Invites.Where(i => i.AccountId == accountId && i.ExpiresAt > DateTime.UtcNow)
+        .OrderBy(i => i.CreatedAt).ToListAsync();
+    return Results.Ok(new { members = members.Select(MemberView), invites });
+});
+
+// Creates an invite and returns its one-time code. The code is only shown
+// here, so the owner copies the join link right away.
+team.MapPost("/invites", async (InviteRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    var name = Clean(r.Name);
+    var email = Clean(r.Email)?.ToLowerInvariant();
+    if (name is null) return Bad("Enter the person's name.");
+    if (TooLong(name, 200)) return Bad("Name is too long.");
+    if (!LooksLikeEmail(email)) return Bad("Enter a valid email address.");
+    if (!Enum.IsDefined(typeof(UserRole), r.Role)) return Bad("Unknown role.");
+    if (await db.Users.AnyAsync(u => u.Email == email))
+        return Results.Conflict(new { error = "Someone with that email already has a BuildFree account." });
+
+    // Inviting the same email again replaces the old invite and its link.
+    db.Invites.RemoveRange(await db.Invites.Where(i => i.AccountId == accountId && i.Email == email).ToListAsync());
+
+    var code = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
+    var invite = new Invite
+    {
+        AccountId = accountId,
+        Email = email!,
+        Name = name,
+        Role = (UserRole)r.Role,
+        CodeHash = InviteHash(code),
+        InvitedBy = Me(ctx).Name
+    };
+    db.Invites.Add(invite);
+    await db.SaveChangesAsync();
+    return Results.Created($"/api/team/invites/{invite.Id}", new { invite, code });
+}).AddEndpointFilter(OwnerOnly);
+
+team.MapDelete("/invites/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    var invite = await db.Invites.FirstOrDefaultAsync(i => i.Id == id && i.AccountId == accountId);
+    if (invite is null) return Results.NotFound();
+    db.Invites.Remove(invite);
+    await db.SaveChangesAsync();
+    return Results.NoContent();
+}).AddEndpointFilter(OwnerOnly);
+
+team.MapPut("/{id:guid}/role", async (Guid id, RoleRequest r, ClaimsPrincipal me, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id && u.AccountId == accountId);
+    if (user is null) return Results.NotFound();
+    if (!Enum.IsDefined(typeof(UserRole), r.Role)) return Bad("Unknown role.");
+    var role = (UserRole)r.Role;
+    if (user.Role == UserRole.Owner && role != UserRole.Owner &&
+        await db.Users.CountAsync(u => u.AccountId == accountId && u.Role == UserRole.Owner) == 1)
+        return Bad("The company needs at least one owner.");
+    user.Role = role;
+    await db.SaveChangesAsync();
+    return Results.Ok(MemberView(user));
+}).AddEndpointFilter(OwnerOnly);
+
+// Removing someone locks them out right away. Their daily logs and photos stay.
+team.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    if (id == Me(ctx).Id) return Bad("You can't remove yourself.");
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id && u.AccountId == accountId);
+    if (user is null) return Results.NotFound();
+    db.Users.Remove(user);
+    await db.SaveChangesAsync();
+    return Results.NoContent();
+}).AddEndpointFilter(OwnerOnly);
+
+// What the join screen shows before the person sets a password. No login needed.
+app.MapGet("/api/invites/{code}", async (string code, AppDbContext db) =>
+{
+    var hash = InviteHash(code);
+    var invite = await db.Invites.FirstOrDefaultAsync(i => i.CodeHash == hash && i.ExpiresAt > DateTime.UtcNow);
+    if (invite is null) return Results.NotFound(new { error = "This invite link is invalid or has expired. Ask for a new one." });
+    var company = await db.Accounts.Where(a => a.Id == invite.AccountId).Select(a => a.Name).FirstOrDefaultAsync();
+    return Results.Ok(new { company, invite.Name, invite.Email, invite.Role });
+});
+
+// Accepting an invite creates the person's login in the inviting company.
+app.MapPost("/api/auth/accept-invite", async (AcceptInviteRequest r, AppDbContext db) =>
+{
+    if (string.IsNullOrWhiteSpace(r.Code)) return Bad("The invite code is missing.");
+    var hash = InviteHash(r.Code.Trim());
+    var invite = await db.Invites.FirstOrDefaultAsync(i => i.CodeHash == hash && i.ExpiresAt > DateTime.UtcNow);
+    if (invite is null) return Results.NotFound(new { error = "This invite link is invalid or has expired. Ask for a new one." });
+    var name = Clean(r.Name) ?? invite.Name;
+    if (TooLong(name, 200)) return Bad("Name is too long.");
+    if (r.Password is null || r.Password.Length < 8) return Bad("Password must be at least 8 characters.");
+    if (r.Password.Length > 200) return Bad("Password is too long.");
+    if (await db.Users.AnyAsync(u => u.Email == invite.Email))
+        return Results.Conflict(new { error = "That email is already registered." });
+
+    var user = new User
+    {
+        AccountId = invite.AccountId,
+        Email = invite.Email,
+        Name = name,
+        Role = invite.Role,
+        PasswordHash = BCrypt.Net.BCrypt.HashPassword(r.Password)
+    };
+    db.Users.Add(user);
+    db.Invites.Remove(invite);
+    await db.SaveChangesAsync();
+    return Results.Ok(new { token = MakeToken(user) });
 });
 
 app.Run();

@@ -11,14 +11,35 @@ public class Account
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
+// What a team member is allowed to do. Owner: everything, including the team.
+// Office: everything except managing the team. Field: sees jobs, posts daily
+// logs and photos, checks off to-dos, and edits only their own logs and photos.
+public enum UserRole { Owner, Office, Field }
+
 public class User
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid AccountId { get; set; }
     public string Email { get; set; } = "";
     public string Name { get; set; } = "";
-    public string PasswordHash { get; set; } = "";
+    [JsonIgnore] public string PasswordHash { get; set; } = "";
+    public UserRole Role { get; set; } = UserRole.Owner;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+// An invitation for someone to join a company. The owner shares a join link
+// that contains a one-time code; only a hash of the code is stored.
+public class Invite
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccountId { get; set; }
+    public string Email { get; set; } = "";
+    public string Name { get; set; } = "";
+    public UserRole Role { get; set; } = UserRole.Field;
+    [JsonIgnore] public string CodeHash { get; set; } = "";
+    public string InvitedBy { get; set; } = "";
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime ExpiresAt { get; set; } = DateTime.UtcNow.AddDays(7);
 }
 
 public class Client
@@ -52,6 +73,7 @@ public class DailyLog
     public Guid AccountId { get; set; }
     public Guid ProjectId { get; set; }
     public string Author { get; set; } = "";
+    public Guid? AuthorId { get; set; }
     public DateOnly Date { get; set; }
     public string Notes { get; set; } = "";
     public int? CrewCount { get; set; }
@@ -84,6 +106,7 @@ public class LogPhoto
     public long SizeBytes { get; set; }
     public string? Caption { get; set; }
     public string UploadedBy { get; set; } = "";
+    public Guid? UploadedById { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
@@ -97,3 +120,6 @@ public record StatusRequest(int Status);
 public record LogRequest(string? Notes, int? CrewCount, DateOnly? Date);
 public record TodoRequest(string? Title, DateOnly? DueDate);
 public record PhotoRequest(string? Caption);
+public record InviteRequest(string? Name, string? Email, int Role);
+public record RoleRequest(int Role);
+public record AcceptInviteRequest(string? Code, string? Name, string? Password);

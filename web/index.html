@@ -134,6 +134,56 @@
   .viewer .meta p { margin: 0; }
   .viewer .bar2 { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .viewer .bar2 .spacer { flex: 1; }
+  .estrow { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); padding: 10px 0; cursor: pointer; }
+  .estrow:hover b { text-decoration: underline; text-underline-offset: 3px; }
+  .estrow b { font-weight: 500; margin-right: 8px; }
+  .estgrid { display: grid; grid-template-columns: 1fr 280px; gap: 20px; align-items: start; }
+  .lines { display: grid; gap: 6px; }
+  .line { display: grid; grid-template-columns: minmax(150px, 3fr) 124px 64px 56px 92px 84px 96px 28px; gap: 6px; align-items: center; }
+  .line input, .line select { padding: 7px 8px; }
+  .line.th { color: var(--muted); font-size: 12px; }
+  .cell-price, .cell-amount { text-align: right; }
+  .totals { position: sticky; top: 16px; gap: 8px; }
+  .trow { display: flex; justify-content: space-between; gap: 12px; }
+  .trow.big { font-weight: 600; font-size: 16px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .trow.warn { color: var(--err); }
+  #print { display: none; }
+  .doc { color: #000; font-size: 12pt; max-width: 7.5in; margin: 0 auto; }
+  .doc .sub { color: #555; }
+  .doc-head { display: flex; justify-content: space-between; gap: 24px; border-bottom: 2px solid #000; padding-bottom: 12px; }
+  .doc-company { font-size: 18pt; font-weight: 600; }
+  .doc-title { font-size: 16pt; font-weight: 600; }
+  .doc-parties { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 18px 0; }
+  .doc-label { font-size: 9pt; text-transform: uppercase; letter-spacing: 0.06em; color: #555; margin-bottom: 4px; }
+  .doc-sub { font-size: 13pt; margin: 0 0 8px; }
+  .doc table { width: 100%; border-collapse: collapse; }
+  .doc th, .doc td { padding: 6px 4px; border-bottom: 1px solid #ccc; text-align: left; vertical-align: top; }
+  .doc th { font-size: 9pt; text-transform: uppercase; color: #555; }
+  .doc .num { text-align: right; white-space: nowrap; }
+  .doc tfoot td { border-bottom: 0; }
+  .doc-total td { font-weight: 600; font-size: 13pt; border-top: 2px solid #000; }
+  .doc-notes { margin-top: 18px; }
+  .doc-notes p { white-space: pre-wrap; margin: 0; }
+  .doc-sign { display: grid; grid-template-columns: 2fr 1fr; gap: 32px; margin-top: 48px; }
+  .doc-sign div { font-size: 10pt; color: #555; }
+  .doc-sign span { display: block; border-bottom: 1px solid #000; height: 32px; margin-bottom: 4px; }
+  @media print {
+    body { background: #fff; }
+    #app, dialog { display: none !important; }
+    #print { display: block; }
+  }
+  @media (max-width: 1440px) {
+    .estgrid { grid-template-columns: 1fr; }
+    .totals { position: static; width: min(360px, 100%); justify-self: end; }
+  }
+  @media (max-width: 900px) {
+    .totals { justify-self: stretch; width: auto; }
+    .line { grid-template-columns: 1fr 1fr 1fr 1fr 28px; grid-template-areas: "desc desc desc desc desc" "cat cat qty unit unit" "cost cost amount amount x"; border-top: 1px solid var(--line); padding-top: 8px; }
+    .line.th { display: none; }
+    .line .cell-desc { grid-area: desc; } .line .cell-cat { grid-area: cat; } .line .cell-qty { grid-area: qty; }
+    .line .cell-unit { grid-area: unit; } .line .cell-cost { grid-area: cost; } .line .cell-price { display: none; }
+    .line .cell-amount { grid-area: amount; } .line .x { grid-area: x; }
+  }
   @media (max-width: 720px) { .layout, .grid2 { grid-template-columns: 1fr; } .pane { padding: 20px; } .side { border-right: 0; border-bottom: 1px solid var(--line); } }
   @media (max-width: 720px) {
     .row, .row.clients, .row.team { grid-template-columns: 1fr auto; row-gap: 2px; }
@@ -146,6 +196,7 @@
 </head>
 <body>
 <div id="app"></div>
+<div id="print"></div>
 
 <script>
   // Where the API is running. Change this when the API is hosted online.
@@ -215,7 +266,7 @@
     return data;
   }
 
-  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; clearPhotoCache(); render(); }
+  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; estimates = []; estimateOpen = null; clearPhotoCache(); render(); }
 
   async function loadData() {
     [me, team, projects, clients, todos] = await Promise.all([api("/api/me"), api("/api/team"), api("/api/projects"), api("/api/clients"), api("/api/todos")]);
@@ -295,19 +346,21 @@
 
   /* ---------- App ---------- */
   let selected = null, logs = [], photos = [], jobQuery = "";
+  let estimates = [], estimateOpen = null; // estimateOpen: an estimate id, "new", or null
   const todayStr = () => new Date().toLocaleDateString("en-CA");
   const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "";
 
   async function refresh() {
     await loadData();
-    [logs, photos] = selected
+    [logs, photos, estimates] = selected
       ? await Promise.all([
           api("/api/projects/" + selected + "/logs").catch(() => []),
-          api("/api/projects/" + selected + "/photos").catch(() => [])])
-      : [[], []];
+          api("/api/projects/" + selected + "/photos").catch(() => []),
+          canManage() ? api("/api/projects/" + selected + "/estimates").catch(() => []) : []])
+      : [[], [], []];
     render();
   }
-  async function selectJob(id) { selected = id; await refresh(); }
+  async function selectJob(id) { selected = id; estimateOpen = null; await refresh(); }
 
   function appView() {
     const tab = (id, text) => h("button", { class: "tab", "aria-current": view === id ? "page" : false, onclick: () => { view = id; render(); } }, text);
@@ -337,7 +390,7 @@
       h("input", { placeholder: "Search jobs", "aria-label": "Search jobs", value: jobQuery, oninput: (e) => { jobQuery = e.target.value; fill(); } }),
       listEl);
     const p = projects.find(x => x.id === selected);
-    return h("div", { class: "layout" }, side, h("div", { class: "pane" }, p ? jobDetail(p) : home()));
+    return h("div", { class: "layout" }, side, h("div", { class: "pane" }, p ? (estimateOpen && canManage() ? estimateEditor(p) : jobDetail(p)) : home()));
   }
 
   function todoRow(t, jobLabel) {
@@ -564,6 +617,7 @@
             h("p", {}, l.notes),
             thumbs(byLog(l.id), ordered))) : h("p", { class: "sub" }, "No logs yet.")),
         h("div", { class: "stack", style: "gap:20px" },
+          canManage() ? estimatesPanel(p) : null,
           h("div", { class: "panel" }, h("h2", {}, "To-dos"), todoForm, todoErr,
             mine.length ? mine.map(t => todoRow(t)) : h("p", { class: "sub" }, "No to-dos yet.")),
           h("div", { class: "panel" }, h("h2", {}, "Photos (" + photos.length + ")"),
@@ -754,5 +808,6 @@
   window.addEventListener("hashchange", () => { if (joinCode()) start(); });
   start();
 </script>
+<script src="estimates.js"></script>
 </body>
 </html>

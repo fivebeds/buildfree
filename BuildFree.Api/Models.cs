@@ -112,15 +112,20 @@ public class LogPhoto
 
 public enum EstimateStatus { Draft, Sent, Approved, Declined }
 public enum EstimateCategory { Labor, Materials, Subcontractor, Equipment, Other }
+public enum EstimateKind { Estimate, ChangeOrder }
 
-// A priced estimate for a job. Line items are entered at cost; the customer
-// price is cost plus MarkupPercent. TaxPercent applies to materials only.
+// A priced estimate or change order for a job. Line items are entered at cost;
+// the customer price is cost plus MarkupPercent. TaxPercent applies to
+// materials only. Change orders use the same table, with Kind = ChangeOrder,
+// their own numbering, optional DaysAdded, and credit lines (negative cost).
 public class Estimate
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid AccountId { get; set; }
     public Guid ProjectId { get; set; }
+    public EstimateKind Kind { get; set; } = EstimateKind.Estimate;
     public int Number { get; set; }
+    public int? DaysAdded { get; set; }
     public string Title { get; set; } = "";
     public EstimateStatus Status { get; set; } = EstimateStatus.Draft;
     public string? Notes { get; set; }
@@ -156,4 +161,4 @@ public record InviteRequest(string? Name, string? Email, int Role);
 public record RoleRequest(int Role);
 public record AcceptInviteRequest(string? Code, string? Name, string? Password);
 public record EstimateItemRequest(string? Description, int Category, decimal Quantity, string? Unit, decimal UnitCost);
-public record EstimateRequest(string? Title, string? Notes, decimal? MarkupPercent, decimal? TaxPercent, List<EstimateItemRequest>? Items);
+public record EstimateRequest(string? Title, string? Notes, decimal? MarkupPercent, decimal? TaxPercent, List<EstimateItemRequest>? Items, int? DaysAdded = null);

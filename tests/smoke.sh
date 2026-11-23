@@ -234,6 +234,41 @@ call POST "/api/projects/$JOB/estimates" "$B" "$EST" 404
 call DELETE "/api/estimates/$EST2" "$A" "" 204
 call GET "/api/estimates/$EST2" "$A" "" 404
 
+echo "== Change orders"
+call GET "/api/projects/$JOB/contract" "$A" "" 200
+[[ "$(field '.original == 240 and .approvedChanges == 0 and .revised == 240')" == "true" ]] || { echo "FAIL: contract should start at the approved estimate: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/change-orders" "$A" '{"title":"Add outlets","markupPercent":20,"taxPercent":0,"daysAdded":2,"items":[{"description":"Outlets","category":0,"quantity":4,"unit":"ea","unitCost":50}]}' 201
+CO1="$(field .id)"
+[[ "$(field '.number')" == "1" && "$(field '.kind')" == "1" && "$(field '.daysAdded')" == "2" && "$(field '.total == 240')" == "true" ]] || { echo "FAIL: change order wrong: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/change-orders" "$A" '{"title":"Remove backsplash","items":[{"description":"Backsplash credit","category":1,"quantity":1,"unitCost":-100}]}' 201
+CO2="$(field .id)"
+[[ "$(field '.number')" == "2" && "$(field '.total == -100')" == "true" ]] || { echo "FAIL: credit change order wrong: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/estimates" "$A" '{"title":"No credits","items":[{"description":"X","category":1,"quantity":1,"unitCost":-5}]}' 400
+call POST "/api/projects/$JOB/change-orders" "$A" '{"title":"Too long","daysAdded":9999,"items":[{"description":"X","category":0,"quantity":1,"unitCost":5}]}' 400
+call GET "/api/projects/$JOB/change-orders" "$A" "" 200
+[[ "$(field 'length')" == "2" ]] || { echo "FAIL: change order list wrong"; exit 1; }
+call GET "/api/projects/$JOB/estimates" "$A" "" 200
+[[ "$(field 'length')" == "2" ]] || { echo "FAIL: change orders showed up in the estimate list"; exit 1; }
+call GET "/api/projects/$JOB/contract" "$A" "" 200
+[[ "$(field '.pendingChanges == 140 and .pendingCount == 2 and .revised == 240')" == "true" ]] || { echo "FAIL: pending changes wrong: $BODY"; exit 1; }
+call PUT "/api/estimates/$CO1/status" "$A" '{"status":2}' 200
+call PUT "/api/estimates/$CO1" "$A" '{"title":"Change after approval","items":[{"description":"X","category":0,"quantity":1,"unitCost":5}]}' 409
+call GET "/api/projects/$JOB/contract" "$A" "" 200
+[[ "$(field '.approvedChanges == 240 and .revised == 480 and .pendingChanges == -100 and .daysAdded == 2')" == "true" ]] || { echo "FAIL: contract after approval wrong: $BODY"; exit 1; }
+call PUT "/api/estimates/$CO2" "$A" '{"title":"Remove backsplash","daysAdded":-1,"items":[{"description":"Backsplash credit","category":1,"quantity":1,"unitCost":-150}]}' 200
+[[ "$(field '.total == -150' )" == "true" && "$(field '.daysAdded')" == "-1" ]] || { echo "FAIL: change order edit wrong: $BODY"; exit 1; }
+call POST "/api/estimates/$CO2/copy" "$A" "" 201
+[[ "$(field '.kind')" == "1" && "$(field '.number')" == "3" ]] || { echo "FAIL: change order copy wrong: $BODY"; exit 1; }
+call GET "/api/projects/$JOB/change-orders" "$F" "" 403
+call GET "/api/projects/$JOB/contract" "$F" "" 403
+call POST "/api/projects/$JOB/change-orders" "$F" '{"title":"X","items":[{"description":"X","category":0,"quantity":1,"unitCost":5}]}' 403
+call GET "/api/projects/$JOB/change-orders" "$O" "" 200
+call GET "/api/projects/$JOB/contract" "$B" "" 404
+call GET "/api/projects/$JOB/change-orders" "$B" "" 200
+[[ "$(field 'length')" == "0" ]] || { echo "FAIL: company B can see company A's change orders"; exit 1; }
+call POST "/api/projects/$JOB/change-orders" "$B" '{"title":"X","items":[{"description":"X","category":0,"quantity":1,"unitCost":5}]}' 404
+call GET "/api/estimates/$CO1" "$B" "" 404
+
 echo "== Owner manages roles"
 call GET /api/team "$B" "" 200
 [[ "$(field '.members | length')" == "1" ]] || { echo "FAIL: company B can see company A's team"; exit 1; }
@@ -308,6 +343,7 @@ call GET /api/todos "$A" "" 200
 [[ "$(field 'length')" == "0" ]] || { echo "FAIL: to-dos left behind after job delete"; exit 1; }
 getfile "/api/photos/$PHOTO3" "$A" 404
 call GET "/api/estimates/$ESTCOPY" "$A" "" 404
+call GET "/api/estimates/$CO1" "$A" "" 404
 
 echo
 echo "All $PASS checks passed."

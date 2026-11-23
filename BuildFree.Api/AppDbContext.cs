@@ -28,9 +28,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<LogPhoto>().HasIndex(p => new { p.AccountId, p.ProjectId });
         b.Entity<LogPhoto>().HasIndex(p => p.LogId);
 
+        // Estimates and change orders share a table, numbered separately.
         // Deleting a job deletes its estimates, and deleting an estimate
         // deletes its line items (the database does this).
-        b.Entity<Estimate>().HasIndex(e => new { e.AccountId, e.Number }).IsUnique();
+        b.Entity<Estimate>().HasIndex(e => new { e.AccountId, e.Kind, e.Number }).IsUnique();
         b.Entity<Estimate>().HasIndex(e => new { e.AccountId, e.ProjectId });
         b.Entity<Estimate>().HasOne<Project>().WithMany().HasForeignKey(e => e.ProjectId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<Estimate>().Property(e => e.MarkupPercent).HasPrecision(7, 2);

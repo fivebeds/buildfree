@@ -10,3 +10,6 @@ obj/
 # Secrets and local settings
 appsettings.Development.json
 .env
+
+# Photos uploaded while running locally
+photo-uploads/

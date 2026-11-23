@@ -108,6 +108,26 @@
   .group { margin-top: 28px; }
   .group h2 { font-size: 13px; color: var(--muted); font-weight: 500; margin: 0 0 8px; }
   .group h2.late { color: var(--err); }
+  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; margin-top: 10px; }
+  .thumbs:empty { display: none; }
+  .thumb { position: relative; aspect-ratio: 1; padding: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--hover); cursor: zoom-in; }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb.pending { cursor: default; opacity: 0.6; }
+  .photo-pick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+  .filebtn input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+  .filebtn { position: relative; display: inline-flex; align-items: center; gap: 6px; border: 1px dashed var(--line-strong); border-radius: 6px; padding: 7px 12px; cursor: pointer; color: var(--text); font-weight: 500; font-size: 13px; }
+  .filebtn:hover { background: var(--hover); }
+  .filebtn:focus-within { outline: 2px solid var(--text); outline-offset: 2px; }
+  .entry .tools .filebtn { padding: 1px 8px; border-style: solid; border-color: var(--line); font-weight: 400; color: var(--muted); }
+  .entry .tools .filebtn:hover { color: var(--text); }
+  .gallery-date { font-size: 13px; color: var(--muted); font-weight: 500; margin: 14px 0 0; }
+  dialog.viewer { width: min(1000px, calc(100vw - 32px)); }
+  .viewer .stage { background: #000; display: grid; place-items: center; min-height: 240px; border-radius: 10px 10px 0 0; }
+  .viewer .stage img { max-width: 100%; max-height: 70vh; object-fit: contain; display: block; }
+  .viewer .meta { padding: 16px 20px; display: grid; gap: 10px; }
+  .viewer .meta p { margin: 0; }
+  .viewer .bar2 { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .viewer .bar2 .spacer { flex: 1; }
   @media (max-width: 720px) { .layout, .grid2 { grid-template-columns: 1fr; } .pane { padding: 20px; } .side { border-right: 0; border-bottom: 1px solid var(--line); } }
   @media (max-width: 720px) {
     .row, .row.clients { grid-template-columns: 1fr auto; row-gap: 2px; }
@@ -156,11 +176,13 @@
 
   async function api(path, method = "GET", body) {
     let res;
+    // Photos go up as a form upload; everything else is JSON.
+    const isForm = body instanceof FormData;
     try {
       res = await fetch(API + path, {
         method,
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
-        body: body ? JSON.stringify(body) : undefined
+        headers: { ...(isForm ? {} : { "Content-Type": "application/json" }), ...(token ? { Authorization: "Bearer " + token } : {}) },
+        body: isForm ? body : body ? JSON.stringify(body) : undefined
       });
     } catch {
       throw new Error("Can’t reach the server. Make sure the API is running.");
@@ -174,7 +196,7 @@
     return data;
   }
 
-  function logout() { token = null; store.set(null); projects = []; clients = []; todos = []; selected = null; render(); }
+  function logout() { token = null; store.set(null); projects = []; clients = []; todos = []; selected = null; photos = []; clearPhotoCache(); render(); }
 
   async function loadData() {
     [projects, clients, todos] = await Promise.all([api("/api/projects"), api("/api/clients"), api("/api/todos")]);
@@ -214,13 +236,17 @@
   const $ = (s, el = document) => el.querySelector(s);
 
   /* ---------- App ---------- */
-  let selected = null, logs = [], jobQuery = "";
+  let selected = null, logs = [], photos = [], jobQuery = "";
   const todayStr = () => new Date().toLocaleDateString("en-CA");
   const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "";
 
   async function refresh() {
     await loadData();
-    logs = selected ? await api("/api/projects/" + selected + "/logs").catch(() => []) : [];
+    [logs, photos] = selected
+      ? await Promise.all([
+          api("/api/projects/" + selected + "/logs").catch(() => []),
+          api("/api/projects/" + selected + "/photos").catch(() => [])])
+      : [[], []];
     render();
   }
   async function selectJob(id) { selected = id; await refresh(); }
@@ -284,6 +310,112 @@
       group("Upcoming and no date", open.filter(t => !t.dueDate || t.dueDate > t0)));
   }
 
+  /* ---------- Photos ---------- */
+  // Photos need the login token, so they're fetched with it and shown from a
+  // local copy (a blob URL). Each photo is only downloaded once.
+  const photoUrls = new Map();
+  function photoUrl(id) {
+    if (!photoUrls.has(id)) {
+      photoUrls.set(id, fetch(API + "/api/photos/" + id, { headers: { Authorization: "Bearer " + token } })
+        .then(r => { if (!r.ok) throw new Error(); return r.blob(); })
+        .then(b => URL.createObjectURL(b))
+        .catch(() => { photoUrls.delete(id); return ""; }));
+    }
+    return photoUrls.get(id);
+  }
+  function clearPhotoCache() {
+    for (const url of photoUrls.values()) url.then(u => u && URL.revokeObjectURL(u));
+    photoUrls.clear();
+  }
+  function photoImg(photo, alt) {
+    const img = h("img", { alt: alt || photo.caption || "Job photo", loading: "lazy" });
+    photoUrl(photo.id).then(u => { if (u) img.src = u; });
+    return img;
+  }
+
+  // Phone photos are often 4 to 12 MB. Shrink them to at most 2000 px on the
+  // long side as JPEG before uploading, which keeps uploads fast on job sites.
+  async function shrinkPhoto(file) {
+    if (file.type === "image/gif") return file; // keeps animations
+    try {
+      const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+      const scale = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(bmp.width * scale); canvas.height = Math.round(bmp.height * scale);
+      canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      bmp.close && bmp.close();
+      const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", 0.85));
+      if (!blob || (blob.size >= file.size && /^image\/(jpeg|png|webp)$/.test(file.type))) return file;
+      return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+    } catch {
+      return file; // the browser couldn't read it; the server explains what's accepted
+    }
+  }
+
+  // Uploads in groups of 10 (the API's limit per upload).
+  async function uploadPhotos(logId, files, onProgress) {
+    const list = [...files];
+    for (let i = 0; i < list.length; i += 10) {
+      const form = new FormData();
+      const group = await Promise.all(list.slice(i, i + 10).map(shrinkPhoto));
+      group.forEach(f => form.append("photos", f, f.name));
+      if (onProgress) onProgress(Math.min(i + 10, list.length), list.length);
+      await api("/api/logs/" + logId + "/photos", "POST", form);
+    }
+  }
+
+  // A file picker that looks like a button. Phones offer the camera or library.
+  function photoPicker(label, onPick) {
+    const input = h("input", { type: "file", accept: "image/*", multiple: true, onchange: () => { onPick([...input.files]); } });
+    return { input, el: h("label", { class: "filebtn" }, input, label) };
+  }
+
+  function thumbs(list, all) {
+    if (!list.length) return null;
+    return h("div", { class: "thumbs" }, list.map(ph =>
+      h("button", { class: "thumb", type: "button", title: ph.caption || "Open photo", onclick: () => photoViewer(all, all.indexOf(ph)) }, photoImg(ph))));
+  }
+
+  // Full-size view with caption, previous/next and delete.
+  function photoViewer(list, index) {
+    let i = index;
+    const dlg = h("dialog", { class: "viewer", "aria-label": "Photo" });
+    const draw = () => {
+      const ph = list[i];
+      const log = logs.find(l => l.id === ph.logId);
+      const err = h("p", { class: "err", role: "alert" });
+      const caption = h("input", { value: ph.caption || "", maxlength: 500, placeholder: "Add a caption", "aria-label": "Caption" });
+      dlg.replaceChildren(
+        h("div", { class: "stage" }, photoImg(ph)),
+        h("div", { class: "meta" },
+          h("p", { class: "sub" }, [log && fmtDate(log.date), "Added by " + ph.uploadedBy, list.length > 1 && (i + 1) + " of " + list.length].filter(Boolean).join(" · ")),
+          h("form", { class: "inline", onsubmit: async (e) => {
+            e.preventDefault(); err.textContent = "";
+            try { const out = await api("/api/photos/" + ph.id, "PUT", { caption: caption.value }); Object.assign(ph, out); draw(); }
+            catch (ex) { err.textContent = ex.message; }
+          } }, caption, h("button", { class: "btn ghost", type: "submit" }, "Save caption")),
+          err,
+          h("div", { class: "bar2" },
+            h("button", { class: "btn ghost", type: "button", disabled: i === 0 ? "" : false, onclick: () => { i--; draw(); } }, "Previous"),
+            h("button", { class: "btn ghost", type: "button", disabled: i === list.length - 1 ? "" : false, onclick: () => { i++; draw(); } }, "Next"),
+            h("span", { class: "spacer" }),
+            h("button", { class: "link danger", type: "button", onclick: async () => {
+              if (!confirm("Delete this photo? This can’t be undone.")) return;
+              try { await api("/api/photos/" + ph.id, "DELETE"); dlg.close(); await refresh(); }
+              catch (ex) { err.textContent = ex.message; }
+            } }, "Delete photo"),
+            h("button", { class: "btn", type: "button", onclick: () => dlg.close() }, "Close"))));
+    };
+    dlg.addEventListener("keydown", (e) => {
+      if (e.target.tagName === "INPUT") return;
+      if (e.key === "ArrowLeft" && i > 0) { i--; draw(); }
+      if (e.key === "ArrowRight" && i < list.length - 1) { i++; draw(); }
+    });
+    dlg.addEventListener("close", () => dlg.remove());
+    draw();
+    document.body.append(dlg); dlg.showModal();
+  }
+
   function jobDetail(p) {
     const client = clients.find(c => c.id === p.clientId);
     const mine = todos.filter(t => t.projectId === p.id);
@@ -291,18 +423,55 @@
       STATUS.map((s, i) => h("option", { value: i, selected: p.status === i ? "" : false }, s.label)));
 
     const logErr = h("p", { class: "err", role: "alert" });
+    let picked = [];
+    const pickNote = h("span", {});
+    const preview = h("div", { class: "thumbs" });
+    const picker = photoPicker("Add photos", (files) => {
+      picked = files.slice(0, 30);
+      pickNote.textContent = picked.length ? picked.length + " photo" + (picked.length === 1 ? "" : "s") + " ready" : "";
+      preview.replaceChildren(...picked.map(f => {
+        const img = h("img", { alt: f.name });
+        img.src = URL.createObjectURL(f);
+        img.onload = () => URL.revokeObjectURL(img.src);
+        return h("span", { class: "thumb pending" }, img);
+      }));
+    });
     const logForm = h("form", { class: "stack", onsubmit: async (e) => {
       e.preventDefault(); logErr.textContent = "";
       const f = Object.fromEntries(new FormData(logForm));
-      try { await api("/api/projects/" + p.id + "/logs", "POST", { notes: f.notes, crewCount: f.crew ? +f.crew : null, date: f.date || null }); await refresh(); }
-      catch (ex) { logErr.textContent = ex.message; }
+      const btn = $("button[type=submit]", logForm); btn.disabled = true;
+      let log;
+      try {
+        log = await api("/api/projects/" + p.id + "/logs", "POST", { notes: f.notes, crewCount: f.crew ? +f.crew : null, date: f.date || null });
+        if (picked.length) await uploadPhotos(log.id, picked, (done, total) => { btn.textContent = "Uploading " + done + " of " + total + "…"; });
+        await refresh();
+      } catch (ex) {
+        // If the log saved but a photo didn't, keep the log and say so.
+        if (log) { await refresh(); alert("The log was saved, but some photos didn’t upload: " + ex.message); }
+        else { logErr.textContent = ex.message; btn.disabled = false; }
+      }
     } },
       h("textarea", { name: "notes", required: true, rows: 3, placeholder: "What happened on site today?" }),
       h("div", { class: "inline" },
         h("input", { name: "date", type: "date", value: todayStr() }),
         h("input", { name: "crew", type: "number", min: 0, placeholder: "Crew on site" }),
         h("button", { class: "btn", type: "submit" }, "Add log")),
+      h("div", { class: "photo-pick" }, picker.el, pickNote),
+      preview,
       logErr);
+
+    // Adds photos to a log that already exists.
+    const addToLog = (l) => photoPicker("+ Photos", async (files) => {
+      try { await uploadPhotos(l.id, files); await refresh(); }
+      catch (ex) { await refresh(); alert(ex.message); }
+    }).el;
+
+    // All photos on this job, grouped by the date of their log.
+    const byLog = (id) => photos.filter(ph => ph.logId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const ordered = logs.flatMap(l => byLog(l.id));
+    const gallery = logs.filter(l => byLog(l.id).length).map(l => [
+      h("p", { class: "gallery-date" }, fmtDate(l.date) + " · " + byLog(l.id).length + " photo" + (byLog(l.id).length === 1 ? "" : "s")),
+      thumbs(byLog(l.id), ordered)]);
 
     const todoErr = h("p", { class: "err", role: "alert" });
     const todoForm = h("form", { class: "inline", onsubmit: async (e) => {
@@ -319,19 +488,24 @@
       h("div", { class: "head" }, h("h1", {}, p.name),
         h("div", { class: "headtools" }, status,
           h("button", { class: "btn ghost", onclick: () => projectDialog(p) }, "Edit job"),
-          h("button", { class: "btn ghost", onclick: () => confirmDelete("Delete “" + p.name + "”? Its daily logs and to-dos are deleted too. This can’t be undone.", "/api/projects/" + p.id, () => { selected = null; }) }, "Delete"))),
+          h("button", { class: "btn ghost", onclick: () => confirmDelete("Delete “" + p.name + "”? Its daily logs, photos and to-dos are deleted too. This can’t be undone.", "/api/projects/" + p.id, () => { selected = null; }) }, "Delete"))),
       h("p", { class: "sub" }, [p.address, client && "Client: " + client.name, p.startDate && "Start " + fmtDate(p.startDate), p.endDate && "End " + fmtDate(p.endDate)].filter(Boolean).join(" · ") || "No address or client yet"),
       h("div", { class: "grid2" },
         h("div", { class: "panel" }, h("h2", {}, "Daily logs"), logForm,
           logs.length ? logs.map(l => h("div", { class: "entry" },
             h("div", { class: "tools" },
+              addToLog(l),
               h("button", { class: "link", type: "button", onclick: () => logDialog(l) }, "Edit"),
-              h("button", { class: "link danger", type: "button", onclick: () => confirmDelete("Delete this daily log?", "/api/logs/" + l.id) }, "Delete")),
+              h("button", { class: "link danger", type: "button", onclick: () => confirmDelete(byLog(l.id).length ? "Delete this daily log and its " + byLog(l.id).length + " photo(s)?" : "Delete this daily log?", "/api/logs/" + l.id) }, "Delete")),
             h("b", {}, fmtDate(l.date)),
             h("span", { class: "sub" }, " · " + l.author + (l.crewCount != null ? " · " + l.crewCount + " on site" : "")),
-            h("p", {}, l.notes))) : h("p", { class: "sub" }, "No logs yet.")),
-        h("div", { class: "panel" }, h("h2", {}, "To-dos"), todoForm, todoErr,
-          mine.length ? mine.map(t => todoRow(t)) : h("p", { class: "sub" }, "No to-dos yet."))));
+            h("p", {}, l.notes),
+            thumbs(byLog(l.id), ordered))) : h("p", { class: "sub" }, "No logs yet.")),
+        h("div", { class: "stack", style: "gap:20px" },
+          h("div", { class: "panel" }, h("h2", {}, "To-dos"), todoForm, todoErr,
+            mine.length ? mine.map(t => todoRow(t)) : h("p", { class: "sub" }, "No to-dos yet.")),
+          h("div", { class: "panel" }, h("h2", {}, "Photos (" + photos.length + ")"),
+            photos.length ? gallery.flat() : h("p", { class: "sub" }, "Photos you add to daily logs show up here.")))));
   }
 
   function clientsView() {

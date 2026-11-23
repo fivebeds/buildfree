@@ -192,6 +192,48 @@ call PUT "/api/photos/$FPHOTO" "$O" '{"caption":"West wall framing"}' 200
 call POST /api/team/invites "$O" "{\"name\":\"X\",\"email\":\"z$RUN@example.com\",\"role\":2}" 403
 call PUT "/api/team/$FID/role" "$O" '{"role":1}' 403
 
+echo "== Estimates"
+EST='{"title":"Kitchen remodel","markupPercent":25,"taxPercent":7.75,"notes":"Valid for 30 days.","items":[{"description":"Demo and haul away","category":0,"quantity":10,"unit":"hr","unitCost":65},{"description":"Cabinets","category":1,"quantity":3,"unit":"ea","unitCost":120}]}'
+call POST "/api/projects/$JOB/estimates" "$A" "$EST" 201
+ESTID="$(field .id)"
+[[ "$(field '.number')" == "1" && "$(field '.status')" == "0" ]] || { echo "FAIL: new estimate should be draft #1"; exit 1; }
+[[ "$(field '.items[0].unitPrice == 81.25 and .items[0].amount == 812.5 and .items[1].amount == 450')" == "true" ]] || { echo "FAIL: line prices wrong: $BODY"; exit 1; }
+[[ "$(field '.subtotal == 1262.5 and .tax == 34.88 and .total == 1297.38')" == "true" ]] || { echo "FAIL: estimate totals wrong: $BODY"; exit 1; }
+[[ "$(field '.cost == 1010 and .profit == 252.5 and .marginPercent == 20')" == "true" ]] || { echo "FAIL: estimate profit wrong: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/estimates" "$A" '{"title":"Option B","items":[{"description":"Paint","category":2,"quantity":1,"unitCost":900}]}' 201
+EST2="$(field .id)"
+[[ "$(field '.number')" == "2" && "$(field '.total == 900')" == "true" ]] || { echo "FAIL: second estimate wrong"; exit 1; }
+call POST "/api/projects/$JOB/estimates" "$A" '{"title":"","items":[]}' 400
+call POST "/api/projects/$JOB/estimates" "$A" '{"title":"No items"}' 400
+call POST "/api/projects/$JOB/estimates" "$A" '{"title":"Bad line","items":[{"description":"X","category":1,"quantity":0,"unitCost":5}]}' 400
+call POST "/api/projects/$JOB/estimates" "$A" '{"title":"Bad line","items":[{"description":"X","category":9,"quantity":1,"unitCost":5}]}' 400
+call POST "/api/projects/$JOB/estimates" "$A" '{"title":"Bad tax","taxPercent":50,"items":[{"description":"X","category":1,"quantity":1,"unitCost":5}]}' 400
+call GET "/api/projects/$JOB/estimates" "$A" "" 200
+[[ "$(field 'length')" == "2" && "$(field '.[0].number')" == "2" ]] || { echo "FAIL: estimate list wrong"; exit 1; }
+call PUT "/api/estimates/$ESTID" "$A" '{"title":"Kitchen remodel v1","markupPercent":20,"taxPercent":0,"items":[{"description":"Cabinets","category":1,"quantity":2,"unit":"ea","unitCost":100}]}' 200
+[[ "$(field '.title')" == "Kitchen remodel v1" && "$(field '.items | length')" == "1" && "$(field '.total == 240')" == "true" ]] || { echo "FAIL: estimate edit not saved: $BODY"; exit 1; }
+call GET "/api/estimates/$ESTID" "$A" "" 200
+[[ "$(field '.items[0].unitPrice == 120')" == "true" ]] || { echo "FAIL: saved estimate wrong"; exit 1; }
+call PUT "/api/estimates/$ESTID/status" "$A" '{"status":9}' 400
+call PUT "/api/estimates/$ESTID/status" "$A" '{"status":2}' 200
+call PUT "/api/estimates/$ESTID" "$A" '{"title":"Change after approval","items":[{"description":"X","category":1,"quantity":1,"unitCost":5}]}' 409
+call POST "/api/estimates/$ESTID/copy" "$A" "" 201
+ESTCOPY="$(field .id)"
+[[ "$(field '.number')" == "3" && "$(field '.status')" == "0" && "$(field '.total == 240')" == "true" ]] || { echo "FAIL: copy wrong: $BODY"; exit 1; }
+call GET "/api/projects/$JOB/estimates" "$O" "" 200
+call GET "/api/projects/$JOB/estimates" "$F" "" 403
+call GET "/api/estimates/$ESTID" "$F" "" 403
+call POST "/api/projects/$JOB/estimates" "$F" "$EST" 403
+call GET "/api/projects/$JOB/estimates" "$B" "" 200
+[[ "$(field 'length')" == "0" ]] || { echo "FAIL: company B can see company A's estimates"; exit 1; }
+call GET "/api/estimates/$ESTID" "$B" "" 404
+call PUT "/api/estimates/$EST2" "$B" "$EST" 404
+call POST "/api/estimates/$ESTID/copy" "$B" "" 404
+call DELETE "/api/estimates/$EST2" "$B" "" 404
+call POST "/api/projects/$JOB/estimates" "$B" "$EST" 404
+call DELETE "/api/estimates/$EST2" "$A" "" 204
+call GET "/api/estimates/$EST2" "$A" "" 404
+
 echo "== Owner manages roles"
 call GET /api/team "$B" "" 200
 [[ "$(field '.members | length')" == "1" ]] || { echo "FAIL: company B can see company A's team"; exit 1; }
@@ -265,6 +307,7 @@ call GET "/api/projects/$JOB/logs" "$A" "" 200
 call GET /api/todos "$A" "" 200
 [[ "$(field 'length')" == "0" ]] || { echo "FAIL: to-dos left behind after job delete"; exit 1; }
 getfile "/api/photos/$PHOTO3" "$A" 404
+call GET "/api/estimates/$ESTCOPY" "$A" "" 404
 
 echo
 echo "All $PASS checks passed."

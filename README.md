@@ -10,11 +10,11 @@ I'm building it in public while I learn to code. Weekly notes live in the `devlo
 
 ## Milestone 1
 
-Sign up and log in, create clients and projects, and post daily logs with job photos. Good enough to run on one real job. All of this works now: sign up, log in, clients, jobs, daily logs with photos, to-dos, and team members with roles.
+Sign up and log in, create clients and projects, and post daily logs with job photos. Good enough to run on one real job. All of this works now: sign up, log in, clients, jobs, daily logs with photos, to-dos, team members with roles, and estimates.
 
 ## Later
 
-Estimates and proposals, change orders with client approval, a simple schedule, a homeowner portal, and QuickBooks export.
+Change orders with client approval, estimate approval by the homeowner, a simple schedule, a homeowner portal, and QuickBooks export.
 
 ## Stack
 
@@ -75,12 +75,24 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | DELETE | `/api/team/{userId}` | Owner only. Remove someone; they're locked out right away and their logs and photos stay |
 | GET | `/api/invites/{code}` | No login needed. What the join screen shows: company, name, email, role |
 | POST | `/api/auth/accept-invite` | No login needed. Set a name and password from an invite code; returns a token |
+| GET, POST | `/api/projects/{id}/estimates` | Owner and office only. List a job's estimates with totals, or create one |
+| GET, PUT, DELETE | `/api/estimates/{id}` | Owner and office only. Get, save (details plus the full list of line items) or delete an estimate |
+| PUT | `/api/estimates/{id}/status` | Set status: 0 Draft, 1 Sent, 2 Approved, 3 Declined |
+| POST | `/api/estimates/{id}/copy` | Make a new draft with the same details and line items |
 
 ## Photos
 
 Photos attach to daily logs. The API accepts JPEG, PNG, GIF and WebP, checked by the file's contents rather than its name. Limits: 10 MB per photo, 10 photos per upload, 30 per log. The web app shrinks phone photos to at most 2,000 pixels on the long side before uploading (usually a few hundred KB), turns them upright, and uploads them in groups of 10.
 
 Uploaded files go in `BuildFree.Api/photo-uploads/` by default (ignored by git). Set `Photos:Path` in configuration, or the `Photos__Path` environment variable, to use another folder. If your local database was created before photos existed, reset it once with `docker compose down -v` then `docker compose up -d` so the photos table gets created.
+
+## Estimates
+
+Each job can have estimates, numbered per company (#1, #2, #3...). Line items have a description, a category (labor, materials, subcontractor, equipment or other), a quantity, a unit and a unit cost. One markup applies to the whole estimate: the customer's unit price is cost plus markup, rounded to the cent. Sales tax applies to materials lines only.
+
+The API returns each line's price and amount, plus the subtotal, tax, total, cost, profit and margin. The customer copy in the web app shows only prices, never cost or markup. Field crew can't see estimates.
+
+An approved estimate is locked. To change it, make a copy, which starts a new draft. Deleting a job deletes its estimates.
 
 ## Team members
 

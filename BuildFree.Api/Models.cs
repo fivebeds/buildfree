@@ -110,6 +110,38 @@ public class LogPhoto
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
+public enum EstimateStatus { Draft, Sent, Approved, Declined }
+public enum EstimateCategory { Labor, Materials, Subcontractor, Equipment, Other }
+
+// A priced estimate for a job. Line items are entered at cost; the customer
+// price is cost plus MarkupPercent. TaxPercent applies to materials only.
+public class Estimate
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccountId { get; set; }
+    public Guid ProjectId { get; set; }
+    public int Number { get; set; }
+    public string Title { get; set; } = "";
+    public EstimateStatus Status { get; set; } = EstimateStatus.Draft;
+    public string? Notes { get; set; }
+    public decimal MarkupPercent { get; set; }
+    public decimal TaxPercent { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
+public class EstimateItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid EstimateId { get; set; }
+    public int Position { get; set; }
+    public string Description { get; set; } = "";
+    public EstimateCategory Category { get; set; }
+    public decimal Quantity { get; set; }
+    public string? Unit { get; set; }
+    public decimal UnitCost { get; set; }
+}
+
 // Request shapes (what the API accepts). Strings can arrive as null when a
 // field is left out of the JSON, so the endpoints check them before use.
 public record SignupRequest(string? CompanyName, string? Name, string? Email, string? Password);
@@ -123,3 +155,5 @@ public record PhotoRequest(string? Caption);
 public record InviteRequest(string? Name, string? Email, int Role);
 public record RoleRequest(int Role);
 public record AcceptInviteRequest(string? Code, string? Name, string? Password);
+public record EstimateItemRequest(string? Description, int Category, decimal Quantity, string? Unit, decimal UnitCost);
+public record EstimateRequest(string? Title, string? Notes, decimal? MarkupPercent, decimal? TaxPercent, List<EstimateItemRequest>? Items);

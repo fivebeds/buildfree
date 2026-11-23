@@ -10,11 +10,11 @@ I'm building it in public while I learn to code. Weekly notes live in the `devlo
 
 ## Milestone 1
 
-Sign up and log in, create clients and projects, and post daily logs with job photos. Good enough to run on one real job. All of this works now: sign up, log in, clients, jobs, daily logs with photos, to-dos, team members with roles, and estimates.
+Sign up and log in, create clients and projects, and post daily logs with job photos. Good enough to run on one real job. All of this works now: sign up, log in, clients, jobs, daily logs with photos, to-dos, team members with roles, estimates and change orders.
 
 ## Later
 
-Change orders with client approval, estimate approval by the homeowner, a simple schedule, a homeowner portal, and QuickBooks export.
+Invoices and payments, estimate and change order approval by the homeowner, a simple schedule, a homeowner portal, and QuickBooks export.
 
 ## Stack
 
@@ -79,6 +79,8 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | GET, PUT, DELETE | `/api/estimates/{id}` | Owner and office only. Get, save (details plus the full list of line items) or delete an estimate |
 | PUT | `/api/estimates/{id}/status` | Set status: 0 Draft, 1 Sent, 2 Approved, 3 Declined |
 | POST | `/api/estimates/{id}/copy` | Make a new draft with the same details and line items |
+| GET, POST | `/api/projects/{id}/change-orders` | Owner and office only. List a job's change orders, or create one. Get, save, status, copy and delete use the `/api/estimates/{id}` endpoints above |
+| GET | `/api/projects/{id}/contract` | Owner and office only. Original contract (latest approved estimate), approved and pending changes, revised total and days added |
 
 ## Photos
 
@@ -93,6 +95,12 @@ Each job can have estimates, numbered per company (#1, #2, #3...). Line items ha
 The API returns each line's price and amount, plus the subtotal, tax, total, cost, profit and margin. The customer copy in the web app shows only prices, never cost or markup. Field crew can't see estimates.
 
 An approved estimate is locked. To change it, make a copy, which starts a new draft. Deleting a job deletes its estimates.
+
+## Change orders
+
+Change orders cover work added or taken out after the estimate is approved. They work like estimates (same line items, markup, tax and print layout) with their own numbering (CO #1, #2...). A change order can add or remove days from the schedule, and a negative unit cost gives the customer a credit.
+
+The job's contract total is the latest approved estimate plus every approved change order. Drafts and sent change orders show as waiting on approval. A printed change order shows the original contract, earlier approved changes, this change and the new contract total, with lines to sign.
 
 ## Team members
 

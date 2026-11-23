@@ -778,4 +778,8 @@ app.MapPost("/api/auth/accept-invite", async (AcceptInviteRequest r, AppDbContex
     return Results.Ok(new { token = MakeToken(user) });
 });
 
+// ---------- Estimates (see Estimates.cs) ----------
+
+app.MapEstimates();
+
 app.Run();

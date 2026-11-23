@@ -35,34 +35,7 @@ public static class Estimates
         // The job's contract: the latest approved estimate, plus approved change
         // orders, gives the revised contract total.
         jobs.MapGet("/{id:guid}/contract", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
-        {
-            var accountId = AccountId(me);
-            if (!await db.Projects.AnyAsync(p => p.Id == id && p.AccountId == accountId)) return Results.NotFound();
-            var docs = await db.Estimates.Where(e => e.ProjectId == id && e.AccountId == accountId).ToListAsync();
-            var ids = docs.Select(e => e.Id).ToList();
-            var items = await db.EstimateItems.Where(i => ids.Contains(i.EstimateId)).ToListAsync();
-            decimal TotalOf(Estimate e) => Totals(e, items.Where(i => i.EstimateId == e.Id)).Total;
-
-            var estimate = docs.Where(e => e.Kind == EstimateKind.Estimate && e.Status == EstimateStatus.Approved)
-                .OrderByDescending(e => e.Number).FirstOrDefault();
-            var changes = docs.Where(e => e.Kind == EstimateKind.ChangeOrder).ToList();
-            var approved = changes.Where(e => e.Status == EstimateStatus.Approved).ToList();
-            var pending = changes.Where(e => e.Status is EstimateStatus.Draft or EstimateStatus.Sent).ToList();
-            decimal? original = estimate is null ? null : TotalOf(estimate);
-            var approvedChanges = approved.Sum(e => TotalOf(e));
-            return Results.Ok(new
-            {
-                EstimateId = estimate?.Id,
-                EstimateNumber = estimate?.Number,
-                Original = original,
-                ApprovedChanges = approvedChanges,
-                ApprovedCount = approved.Count,
-                PendingChanges = pending.Sum(e => TotalOf(e)),
-                PendingCount = pending.Count,
-                Revised = (original ?? 0) + approvedChanges,
-                DaysAdded = approved.Sum(e => e.DaysAdded ?? 0)
-            });
-        });
+            await Contract(db, id, AccountId(me)) is ContractSummary c ? Results.Ok(c) : Results.NotFound());
 
         estimates.MapGet("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
         {
@@ -182,6 +155,33 @@ public static class Estimates
             Items = t.Lines,
             t.Subtotal, t.Tax, t.Total, t.Cost, t.Profit, t.MarginPercent
         };
+    }
+
+    // ---------- Contract ----------
+
+    public record ContractSummary(Guid? EstimateId, int? EstimateNumber, decimal? Original, decimal ApprovedChanges,
+        int ApprovedCount, decimal PendingChanges, int PendingCount, decimal Revised, int DaysAdded);
+
+    // The job's contract: the latest approved estimate plus approved change
+    // orders. Returns null if the job isn't in this company. Invoices use this
+    // too, to show how much is left to bill.
+    public static async Task<ContractSummary?> Contract(AppDbContext db, Guid projectId, Guid accountId)
+    {
+        if (!await db.Projects.AnyAsync(p => p.Id == projectId && p.AccountId == accountId)) return null;
+        var docs = await db.Estimates.Where(e => e.ProjectId == projectId && e.AccountId == accountId).ToListAsync();
+        var ids = docs.Select(e => e.Id).ToList();
+        var items = await db.EstimateItems.Where(i => ids.Contains(i.EstimateId)).ToListAsync();
+        decimal TotalOf(Estimate e) => Totals(e, items.Where(i => i.EstimateId == e.Id)).Total;
+
+        var estimate = docs.Where(e => e.Kind == EstimateKind.Estimate && e.Status == EstimateStatus.Approved)
+            .OrderByDescending(e => e.Number).FirstOrDefault();
+        var changes = docs.Where(e => e.Kind == EstimateKind.ChangeOrder).ToList();
+        var approved = changes.Where(e => e.Status == EstimateStatus.Approved).ToList();
+        var pending = changes.Where(e => e.Status is EstimateStatus.Draft or EstimateStatus.Sent).ToList();
+        decimal? original = estimate is null ? null : TotalOf(estimate);
+        var approvedChanges = approved.Sum(e => TotalOf(e));
+        return new ContractSummary(estimate?.Id, estimate?.Number, original, approvedChanges, approved.Count,
+            pending.Sum(e => TotalOf(e)), pending.Count, (original ?? 0) + approvedChanges, approved.Sum(e => e.DaysAdded ?? 0));
     }
 
     // ---------- Helpers ----------

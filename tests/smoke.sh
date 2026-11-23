@@ -269,6 +269,71 @@ call GET "/api/projects/$JOB/change-orders" "$B" "" 200
 call POST "/api/projects/$JOB/change-orders" "$B" '{"title":"X","items":[{"description":"X","category":0,"quantity":1,"unitCost":5}]}' 404
 call GET "/api/estimates/$CO1" "$B" "" 404
 
+echo "== Invoices and payments"
+DAY0="$(date -u +%F)"
+DUE="$(date -u -d '+14 days' +%F)"
+PAST_ISSUE="$(date -u -d '-20 days' +%F)"
+PAST_DUE="$(date -u -d '-5 days' +%F)"
+call GET "/api/projects/$JOB/billing" "$A" "" 200
+[[ "$(field '.contract == 480 and .invoiced == 0 and .paid == 0 and .leftToBill == 480')" == "true" ]] || { echo "FAIL: billing should start at the revised contract: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/invoices" "$A" "{\"title\":\"Deposit\",\"issueDate\":\"$DAY0\",\"dueDate\":\"$DUE\",\"lines\":[{\"description\":\"Deposit 30% of contract\",\"amount\":144}]}" 201
+INV1="$(field .id)"
+[[ "$(field '.number')" == "1" && "$(field '.state')" == "draft" && "$(field '.total == 144 and .balance == 144')" == "true" ]] || { echo "FAIL: new invoice wrong: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/invoices" "$A" '{"title":"No lines","lines":[]}' 400
+call POST "/api/projects/$JOB/invoices" "$A" '{"title":"Zero","lines":[{"description":"Credit","amount":-5}]}' 400
+call POST "/api/projects/$JOB/invoices" "$A" '{"title":"Dates","issueDate":"2026-12-10","dueDate":"2026-12-01","lines":[{"description":"X","amount":5}]}' 400
+call GET "/api/projects/$JOB/billing" "$A" "" 200
+[[ "$(field '.invoiced == 0 and .draftCount == 1')" == "true" ]] || { echo "FAIL: drafts shouldn't count as invoiced: $BODY"; exit 1; }
+call PUT "/api/invoices/$INV1" "$A" "{\"title\":\"Deposit\",\"issueDate\":\"$DAY0\",\"dueDate\":\"$DUE\",\"notes\":\"Thank you!\",\"lines\":[{\"description\":\"Deposit 30% of contract\",\"amount\":144},{\"description\":\"Permit fee\",\"amount\":56}]}" 200
+[[ "$(field '.total == 200')" == "true" ]] || { echo "FAIL: invoice edit not saved: $BODY"; exit 1; }
+call PUT "/api/invoices/$INV1/status" "$A" '{"status":1}' 200
+[[ "$(field '.state')" == "sent" ]] || { echo "FAIL: invoice should be sent: $BODY"; exit 1; }
+call POST "/api/invoices/$INV1/payments" "$A" "{\"amount\":150,\"date\":\"$DAY0\",\"method\":0,\"reference\":\"Check 1042\"}" 201
+PAY1="$(field '.payments[0].id')"
+[[ "$(field '.state')" == "partial" && "$(field '.paid == 150 and .balance == 50')" == "true" ]] || { echo "FAIL: partial payment wrong: $BODY"; exit 1; }
+call POST "/api/invoices/$INV1/payments" "$A" '{"amount":60,"method":3}' 400
+call POST "/api/invoices/$INV1/payments" "$A" '{"amount":0,"method":3}' 400
+call POST "/api/invoices/$INV1/payments" "$A" '{"amount":10,"method":9}' 400
+call PUT "/api/invoices/$INV1" "$A" '{"title":"Change","lines":[{"description":"X","amount":5}]}' 409
+call PUT "/api/invoices/$INV1/status" "$A" '{"status":2}' 409
+call DELETE "/api/invoices/$INV1" "$A" "" 409
+call GET "/api/projects/$JOB/billing" "$A" "" 200
+[[ "$(field '.invoiced == 200 and .paid == 150 and .balanceDue == 50 and .leftToBill == 280')" == "true" ]] || { echo "FAIL: billing after payment wrong: $BODY"; exit 1; }
+call POST "/api/invoices/$INV1/payments" "$A" '{"amount":50,"method":3}' 201
+[[ "$(field '.state')" == "paid" && "$(field '.balance == 0')" == "true" && "$(field '.payments | length')" == "2" ]] || { echo "FAIL: invoice should be paid: $BODY"; exit 1; }
+call DELETE "/api/payments/$PAY1" "$A" "" 204
+call GET "/api/invoices/$INV1" "$A" "" 200
+[[ "$(field '.state')" == "partial" && "$(field '.paid == 50')" == "true" ]] || { echo "FAIL: deleting a payment didn't reopen the balance: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/invoices" "$A" "{\"title\":\"Progress 1\",\"issueDate\":\"$PAST_ISSUE\",\"dueDate\":\"$PAST_DUE\",\"lines\":[{\"description\":\"Rough-in\",\"amount\":100}]}" 201
+INV2="$(field .id)"
+[[ "$(field '.number')" == "2" ]] || { echo "FAIL: second invoice number wrong"; exit 1; }
+call PUT "/api/invoices/$INV2/status" "$A" '{"status":1}' 200
+[[ "$(field '.state')" == "overdue" ]] || { echo "FAIL: past-due invoice should be overdue: $BODY"; exit 1; }
+call GET "/api/projects/$JOB/billing" "$A" "" 200
+[[ "$(field '.overdueCount == 1 and .invoiced == 300')" == "true" ]] || { echo "FAIL: overdue count wrong: $BODY"; exit 1; }
+call PUT "/api/invoices/$INV2/status" "$A" '{"status":2}' 200
+[[ "$(field '.state')" == "void" ]] || { echo "FAIL: invoice should be void: $BODY"; exit 1; }
+call POST "/api/invoices/$INV2/payments" "$A" '{"amount":10,"method":1}' 409
+call PUT "/api/invoices/$INV2" "$A" '{"title":"Change","lines":[{"description":"X","amount":5}]}' 409
+call GET "/api/projects/$JOB/billing" "$A" "" 200
+[[ "$(field '.invoiced == 200 and .overdueCount == 0')" == "true" ]] || { echo "FAIL: void invoice still counted: $BODY"; exit 1; }
+call DELETE "/api/invoices/$INV2" "$A" "" 204
+call GET "/api/projects/$JOB/invoices" "$A" "" 200
+[[ "$(field 'length')" == "1" ]] || { echo "FAIL: invoice list wrong"; exit 1; }
+call GET "/api/projects/$JOB/invoices" "$O" "" 200
+call GET "/api/projects/$JOB/invoices" "$F" "" 403
+call GET "/api/projects/$JOB/billing" "$F" "" 403
+call POST "/api/invoices/$INV1/payments" "$F" '{"amount":1,"method":2}' 403
+call GET "/api/projects/$JOB/billing" "$B" "" 404
+call GET "/api/projects/$JOB/invoices" "$B" "" 200
+[[ "$(field 'length')" == "0" ]] || { echo "FAIL: company B can see company A's invoices"; exit 1; }
+call GET "/api/invoices/$INV1" "$B" "" 404
+call POST "/api/invoices/$INV1/payments" "$B" '{"amount":1,"method":2}' 404
+call POST "/api/projects/$JOB/invoices" "$B" '{"title":"X","lines":[{"description":"X","amount":5}]}' 404
+call GET "/api/invoices/$INV1" "$A" "" 200
+PAY2="$(field '.payments[0].id')"
+call DELETE "/api/payments/$PAY2" "$B" "" 404
+
 echo "== Owner manages roles"
 call GET /api/team "$B" "" 200
 [[ "$(field '.members | length')" == "1" ]] || { echo "FAIL: company B can see company A's team"; exit 1; }
@@ -344,6 +409,7 @@ call GET /api/todos "$A" "" 200
 getfile "/api/photos/$PHOTO3" "$A" 404
 call GET "/api/estimates/$ESTCOPY" "$A" "" 404
 call GET "/api/estimates/$CO1" "$A" "" 404
+call GET "/api/invoices/$INV1" "$A" "" 404
 
 echo
 echo "All $PASS checks passed."

@@ -14,6 +14,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Invite> Invites => Set<Invite>();
     public DbSet<Estimate> Estimates => Set<Estimate>();
     public DbSet<EstimateItem> EstimateItems => Set<EstimateItem>();
+    public DbSet<Invoice> Invoices => Set<Invoice>();
+    public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>();
+    public DbSet<Payment> Payments => Set<Payment>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -39,5 +42,16 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<EstimateItem>().HasOne<Estimate>().WithMany().HasForeignKey(i => i.EstimateId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<EstimateItem>().Property(i => i.Quantity).HasPrecision(12, 3);
         b.Entity<EstimateItem>().Property(i => i.UnitCost).HasPrecision(12, 2);
+
+        // Invoices are numbered per company. Deleting a job deletes its
+        // invoices, and deleting an invoice deletes its lines and payments.
+        b.Entity<Invoice>().HasIndex(i => new { i.AccountId, i.Number }).IsUnique();
+        b.Entity<Invoice>().HasIndex(i => new { i.AccountId, i.ProjectId });
+        b.Entity<Invoice>().HasOne<Project>().WithMany().HasForeignKey(i => i.ProjectId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<InvoiceLine>().HasOne<Invoice>().WithMany().HasForeignKey(l => l.InvoiceId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<InvoiceLine>().Property(l => l.Amount).HasPrecision(12, 2);
+        b.Entity<Payment>().HasOne<Invoice>().WithMany().HasForeignKey(p => p.InvoiceId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<Payment>().HasIndex(p => new { p.AccountId, p.InvoiceId });
+        b.Entity<Payment>().Property(p => p.Amount).HasPrecision(12, 2);
     }
 }

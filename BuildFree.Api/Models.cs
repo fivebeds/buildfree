@@ -147,6 +147,50 @@ public class EstimateItem
     public decimal UnitCost { get; set; }
 }
 
+public enum InvoiceStatus { Draft, Sent, Void }
+public enum PaymentMethod { Check, Card, Cash, Zelle, BankTransfer, Other }
+
+// A bill sent to the customer for part or all of the job: a deposit, a
+// progress payment or the final balance. The total is the sum of its lines.
+// Whether it's paid, partly paid or overdue comes from its payments.
+public class Invoice
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccountId { get; set; }
+    public Guid ProjectId { get; set; }
+    public int Number { get; set; }
+    public string Title { get; set; } = "";
+    public InvoiceStatus Status { get; set; } = InvoiceStatus.Draft;
+    public DateOnly IssueDate { get; set; }
+    public DateOnly? DueDate { get; set; }
+    public string? Notes { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
+public class InvoiceLine
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid InvoiceId { get; set; }
+    public int Position { get; set; }
+    public string Description { get; set; } = "";
+    public decimal Amount { get; set; }
+}
+
+// Money received against an invoice.
+public class Payment
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccountId { get; set; }
+    public Guid InvoiceId { get; set; }
+    public decimal Amount { get; set; }
+    public DateOnly Date { get; set; }
+    public PaymentMethod Method { get; set; }
+    public string? Reference { get; set; }
+    public string RecordedBy { get; set; } = "";
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 // Request shapes (what the API accepts). Strings can arrive as null when a
 // field is left out of the JSON, so the endpoints check them before use.
 public record SignupRequest(string? CompanyName, string? Name, string? Email, string? Password);
@@ -162,3 +206,6 @@ public record RoleRequest(int Role);
 public record AcceptInviteRequest(string? Code, string? Name, string? Password);
 public record EstimateItemRequest(string? Description, int Category, decimal Quantity, string? Unit, decimal UnitCost);
 public record EstimateRequest(string? Title, string? Notes, decimal? MarkupPercent, decimal? TaxPercent, List<EstimateItemRequest>? Items, int? DaysAdded = null);
+public record InvoiceLineRequest(string? Description, decimal Amount);
+public record InvoiceRequest(string? Title, DateOnly? IssueDate, DateOnly? DueDate, string? Notes, List<InvoiceLineRequest>? Lines);
+public record PaymentRequest(decimal Amount, DateOnly? Date, int Method, string? Reference);

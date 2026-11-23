@@ -52,6 +52,11 @@
   .row { display: grid; grid-template-columns: 2fr 1.4fr 1.6fr 100px; gap: 16px; padding: 14px 20px; align-items: center; border-top: 1px solid var(--line); }
   .row:first-child { border-top: 0; }
   .row.clients { grid-template-columns: 2fr 2fr 1.4fr auto; }
+  .row.team { grid-template-columns: 2fr 2fr 140px auto; }
+  .row.team select { padding: 5px 8px; }
+  .you { color: var(--muted); font-weight: 400; }
+  .roles { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; display: grid; gap: 4px; }
+  .roles b { color: var(--text); font-weight: 500; }
   .row.th { color: var(--muted); font-size: 13px; padding: 10px 20px; background: var(--bg); }
   .row b { font-weight: 500; }
   .sub { color: var(--muted); }
@@ -66,7 +71,8 @@
   .dlg h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
   label { display: grid; gap: 6px; font-weight: 500; font-size: 13px; }
   input, select, textarea { background: var(--bg); border: 1px solid var(--line-strong); border-radius: 6px; padding: 9px 12px; width: 100%; font-weight: 400; font-size: 14px; }
-  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+  a.btn { text-decoration: none; display: inline-flex; align-items: center; }
   .err { color: var(--err); font-size: 13px; min-height: 18px; margin: 0; }
 
   .auth { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
@@ -130,7 +136,7 @@
   .viewer .bar2 .spacer { flex: 1; }
   @media (max-width: 720px) { .layout, .grid2 { grid-template-columns: 1fr; } .pane { padding: 20px; } .side { border-right: 0; border-bottom: 1px solid var(--line); } }
   @media (max-width: 720px) {
-    .row, .row.clients { grid-template-columns: 1fr auto; row-gap: 2px; }
+    .row, .row.clients, .row.team { grid-template-columns: 1fr auto; row-gap: 2px; }
     .head { flex-wrap: wrap; }
     .row.th { display: none; }
     .hide-sm { display: none; }
@@ -158,6 +164,19 @@
   let token = store.get();
   let view = "jobs";
   let projects = [], clients = [], todos = [];
+  let me = null, team = { members: [], invites: [] };
+
+  // Roles, in the same order as the API. Owners manage the team; owners and
+  // office staff manage jobs and clients; field crew add daily logs, photos
+  // and to-dos, and can change only the logs and photos they added.
+  const ROLES = [
+    { label: "Owner", about: "Everything, including inviting people and changing roles." },
+    { label: "Office", about: "Jobs, clients, daily logs, photos and to-dos. Can't manage the team." },
+    { label: "Field", about: "Sees every job. Adds daily logs, photos and to-dos, and edits only their own logs and photos." }
+  ];
+  const isOwner = () => !!me && me.role === 0;
+  const canManage = () => !!me && me.role !== 2;
+  const canChange = (addedById) => canManage() || (!!me && addedById === me.id);
 
   // Small helper that builds elements safely (text is never treated as HTML).
   function h(tag, props = {}, ...kids) {
@@ -196,10 +215,10 @@
     return data;
   }
 
-  function logout() { token = null; store.set(null); projects = []; clients = []; todos = []; selected = null; photos = []; clearPhotoCache(); render(); }
+  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; clearPhotoCache(); render(); }
 
   async function loadData() {
-    [projects, clients, todos] = await Promise.all([api("/api/projects"), api("/api/clients"), api("/api/todos")]);
+    [me, team, projects, clients, todos] = await Promise.all([api("/api/me"), api("/api/team"), api("/api/projects"), api("/api/clients"), api("/api/todos")]);
   }
 
   /* ---------- Log in / sign up ---------- */
@@ -235,6 +254,45 @@
   }
   const $ = (s, el = document) => el.querySelector(s);
 
+  /* ---------- Joining a team from an invite link ---------- */
+  const joinCode = () => (location.hash.match(/^#join=([0-9a-f]+)$/i) || [])[1];
+  function leaveJoin() { history.replaceState(null, "", location.pathname + location.search); }
+
+  async function joinView(code) {
+    token = null; // the link is for the person being invited, not whoever was logged in here
+    let invite;
+    try { invite = await api("/api/invites/" + code); }
+    catch (ex) {
+      return h("div", { class: "auth" }, h("div", { class: "card" },
+        h("div", { class: "logo" }, h("i"), "BuildFree"),
+        h("h1", {}, "This link doesn’t work"),
+        h("p", { class: "sub", style: "margin:0" }, ex.message),
+        h("button", { class: "btn", type: "button", onclick: () => { leaveJoin(); token = store.get(); start(); } }, "Go to log in")));
+    }
+    const err = h("p", { class: "err", role: "alert" });
+    const form = h("form", { class: "card", onsubmit: async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(form));
+      const btn = $("button[type=submit]", form);
+      btn.disabled = true; err.textContent = "";
+      try {
+        const out = await api("/api/auth/accept-invite", "POST", { code, name: f.name, password: f.password });
+        token = out.token; store.set(token); leaveJoin();
+        await loadData(); render();
+      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+    } },
+      h("div", { class: "logo" }, h("i"), "BuildFree"),
+      h("h1", {}, "Join " + (invite.company || "your team")),
+      h("p", { class: "sub", style: "margin:0" }, "You’re invited as " + ROLES[invite.role].label + ". " + ROLES[invite.role].about),
+      h("label", {}, "Your name", h("input", { name: "name", required: true, maxlength: 200, autocomplete: "name", value: invite.name })),
+      h("label", {}, "Email", h("input", { type: "email", value: invite.email, disabled: "", autocomplete: "username" })),
+      field("Choose a password", "password", "password", "new-password"),
+      err,
+      h("button", { class: "btn", type: "submit" }, "Join team"),
+      h("button", { class: "link", type: "button", onclick: () => { leaveJoin(); token = store.get(); start(); } }, "Already have an account? Log in"));
+    return h("div", { class: "auth" }, form);
+  }
+
   /* ---------- App ---------- */
   let selected = null, logs = [], photos = [], jobQuery = "";
   const todayStr = () => new Date().toLocaleDateString("en-CA");
@@ -256,9 +314,9 @@
     return h("div", {},
       h("div", { class: "top" }, h("div", { class: "bar wide" },
         h("div", { class: "logo" }, h("i"), "BuildFree"),
-        h("div", { class: "tabs" }, tab("jobs", "Jobs"), tab("clients", "Clients")),
+        h("div", { class: "tabs" }, tab("jobs", "Jobs"), tab("clients", "Clients"), tab("team", "Team")),
         h("button", { class: "tab", onclick: logout }, "Log out"))),
-      view === "jobs" ? jobsView() : h("main", {}, clientsView()));
+      view === "jobs" ? jobsView() : h("main", {}, view === "team" ? teamView() : clientsView()));
   }
 
   function jobsView() {
@@ -275,7 +333,7 @@
     };
     fill();
     const side = h("aside", { class: "side" },
-      h("button", { class: "btn full", onclick: () => projectDialog() }, "New job"),
+      canManage() && h("button", { class: "btn full", onclick: () => projectDialog() }, "New job"),
       h("input", { placeholder: "Search jobs", "aria-label": "Search jobs", value: jobQuery, oninput: (e) => { jobQuery = e.target.value; fill(); } }),
       listEl);
     const p = projects.find(x => x.id === selected);
@@ -304,7 +362,7 @@
       items.length ? h("div", { class: "panel" }, items.map(t => todoRow(t, jobName(t.projectId)))) : h("p", { class: "sub" }, "Nothing here."));
     return h("div", {},
       h("div", { class: "head" }, h("h1", {}, "Today")),
-      h("p", { class: "sub" }, projects.length ? "Pick a job on the left, or work through your to-dos below." : "Create your first job to get started."),
+      h("p", { class: "sub" }, projects.length ? "Pick a job on the left, or work through your to-dos below." : canManage() ? "Create your first job to get started." : "No jobs yet. The office adds jobs, and they show up here."),
       group("Past due", open.filter(t => t.dueDate && t.dueDate < t0), "late"),
       group("Due today", open.filter(t => t.dueDate === t0)),
       group("Upcoming and no date", open.filter(t => !t.dueDate || t.dueDate > t0)));
@@ -389,17 +447,19 @@
         h("div", { class: "stage" }, photoImg(ph)),
         h("div", { class: "meta" },
           h("p", { class: "sub" }, [log && fmtDate(log.date), "Added by " + ph.uploadedBy, list.length > 1 && (i + 1) + " of " + list.length].filter(Boolean).join(" · ")),
-          h("form", { class: "inline", onsubmit: async (e) => {
-            e.preventDefault(); err.textContent = "";
-            try { const out = await api("/api/photos/" + ph.id, "PUT", { caption: caption.value }); Object.assign(ph, out); draw(); }
-            catch (ex) { err.textContent = ex.message; }
-          } }, caption, h("button", { class: "btn ghost", type: "submit" }, "Save caption")),
+          canChange(ph.uploadedById)
+            ? h("form", { class: "inline", onsubmit: async (e) => {
+                e.preventDefault(); err.textContent = "";
+                try { const out = await api("/api/photos/" + ph.id, "PUT", { caption: caption.value }); Object.assign(ph, out); draw(); }
+                catch (ex) { err.textContent = ex.message; }
+              } }, caption, h("button", { class: "btn ghost", type: "submit" }, "Save caption"))
+            : ph.caption && h("p", {}, ph.caption),
           err,
           h("div", { class: "bar2" },
             h("button", { class: "btn ghost", type: "button", disabled: i === 0 ? "" : false, onclick: () => { i--; draw(); } }, "Previous"),
             h("button", { class: "btn ghost", type: "button", disabled: i === list.length - 1 ? "" : false, onclick: () => { i++; draw(); } }, "Next"),
             h("span", { class: "spacer" }),
-            h("button", { class: "link danger", type: "button", onclick: async () => {
+            canChange(ph.uploadedById) && h("button", { class: "link danger", type: "button", onclick: async () => {
               if (!confirm("Delete this photo? This can’t be undone.")) return;
               try { await api("/api/photos/" + ph.id, "DELETE"); dlg.close(); await refresh(); }
               catch (ex) { err.textContent = ex.message; }
@@ -419,7 +479,9 @@
   function jobDetail(p) {
     const client = clients.find(c => c.id === p.clientId);
     const mine = todos.filter(t => t.projectId === p.id);
-    const status = h("select", { "aria-label": "Status", style: "width:auto", onchange: async (e) => { await api("/api/projects/" + p.id + "/status", "PUT", { status: +e.target.value }); await refresh(); } },
+    const status = !canManage()
+      ? h("span", { class: "badge", style: "--c:" + (STATUS[p.status] || STATUS[0]).color }, (STATUS[p.status] || STATUS[0]).label)
+      : h("select", { "aria-label": "Status", style: "width:auto", onchange: async (e) => { await api("/api/projects/" + p.id + "/status", "PUT", { status: +e.target.value }); await refresh(); } },
       STATUS.map((s, i) => h("option", { value: i, selected: p.status === i ? "" : false }, s.label)));
 
     const logErr = h("p", { class: "err", role: "alert" });
@@ -487,16 +549,16 @@
     return h("div", {},
       h("div", { class: "head" }, h("h1", {}, p.name),
         h("div", { class: "headtools" }, status,
-          h("button", { class: "btn ghost", onclick: () => projectDialog(p) }, "Edit job"),
-          h("button", { class: "btn ghost", onclick: () => confirmDelete("Delete “" + p.name + "”? Its daily logs, photos and to-dos are deleted too. This can’t be undone.", "/api/projects/" + p.id, () => { selected = null; }) }, "Delete"))),
+          canManage() && h("button", { class: "btn ghost", onclick: () => projectDialog(p) }, "Edit job"),
+          canManage() && h("button", { class: "btn ghost", onclick: () => confirmDelete("Delete “" + p.name + "”? Its daily logs, photos and to-dos are deleted too. This can’t be undone.", "/api/projects/" + p.id, () => { selected = null; }) }, "Delete"))),
       h("p", { class: "sub" }, [p.address, client && "Client: " + client.name, p.startDate && "Start " + fmtDate(p.startDate), p.endDate && "End " + fmtDate(p.endDate)].filter(Boolean).join(" · ") || "No address or client yet"),
       h("div", { class: "grid2" },
         h("div", { class: "panel" }, h("h2", {}, "Daily logs"), logForm,
           logs.length ? logs.map(l => h("div", { class: "entry" },
             h("div", { class: "tools" },
               addToLog(l),
-              h("button", { class: "link", type: "button", onclick: () => logDialog(l) }, "Edit"),
-              h("button", { class: "link danger", type: "button", onclick: () => confirmDelete(byLog(l.id).length ? "Delete this daily log and its " + byLog(l.id).length + " photo(s)?" : "Delete this daily log?", "/api/logs/" + l.id) }, "Delete")),
+              canChange(l.authorId) && h("button", { class: "link", type: "button", onclick: () => logDialog(l) }, "Edit"),
+              canChange(l.authorId) && h("button", { class: "link danger", type: "button", onclick: () => confirmDelete(byLog(l.id).length ? "Delete this daily log and its " + byLog(l.id).length + " photo(s)?" : "Delete this daily log?", "/api/logs/" + l.id) }, "Delete")),
             h("b", {}, fmtDate(l.date)),
             h("span", { class: "sub" }, " · " + l.author + (l.crewCount != null ? " · " + l.crewCount + " on site" : "")),
             h("p", {}, l.notes),
@@ -510,7 +572,7 @@
 
   function clientsView() {
     return h("div", {},
-      h("div", { class: "head" }, h("h1", {}, "Clients"), h("button", { class: "btn", onclick: () => clientDialog() }, "Add client")),
+      h("div", { class: "head" }, h("h1", {}, "Clients"), canManage() && h("button", { class: "btn", onclick: () => clientDialog() }, "Add client")),
       clients.length === 0
         ? h("div", { class: "list" }, h("div", { class: "empty" }, h("b", {}, "No clients yet"), "Add a client so you can attach them to projects."))
         : h("div", { class: "list" },
@@ -519,9 +581,86 @@
               h("b", {}, c.name),
               h("span", { class: "sub hide-sm mono" }, c.email || "No email"),
               h("span", { class: "sub hide-sm mono" }, c.phone || "No phone"),
-              h("div", { class: "tools" },
+              canManage() && h("div", { class: "tools" },
                 h("button", { class: "link", onclick: () => clientDialog(c) }, "Edit"),
                 h("button", { class: "link danger", onclick: () => confirmDelete("Delete client “" + c.name + "”? Their jobs are kept.", "/api/clients/" + c.id) }, "Delete"))))));
+  }
+
+  /* ---------- Team ---------- */
+  function teamView() {
+    const owner = isOwner();
+    const err = h("p", { class: "err", role: "alert" });
+    const roleCell = (u) => {
+      if (!owner || u.id === me.id) return h("span", { class: "sub" }, ROLES[u.role].label);
+      return h("select", { "aria-label": "Role for " + u.name, onchange: async (e) => {
+        err.textContent = "";
+        try { await api("/api/team/" + u.id + "/role", "PUT", { role: +e.target.value }); await refresh(); }
+        catch (ex) { err.textContent = ex.message; e.target.value = u.role; }
+      } }, ROLES.map((r, i) => h("option", { value: i, selected: u.role === i ? "" : false }, r.label)));
+    };
+    const expires = (d) => new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return h("div", {},
+      h("div", { class: "head" }, h("h1", {}, "Team"), owner && h("button", { class: "btn", onclick: () => inviteDialog() }, "Invite someone")),
+      err,
+      h("div", { class: "list" },
+        h("div", { class: "row team th" }, h("span", {}, "Name"), h("span", { class: "hide-sm" }, "Email"), h("span", {}, "Role"), h("span", {})),
+        team.members.map(u => h("div", { class: "row team" },
+          h("b", {}, u.name, u.id === me.id ? h("span", { class: "you" }, " (you)") : null),
+          h("span", { class: "sub hide-sm mono" }, u.email),
+          roleCell(u),
+          h("div", { class: "tools" }, owner && u.id !== me.id && h("button", { class: "link danger", onclick: () =>
+            confirmDelete("Remove " + u.name + " from the team? They can’t log in anymore. Their daily logs and photos stay.", "/api/team/" + u.id) }, "Remove"))))),
+      team.invites.length ? h("div", { class: "group" },
+        h("h2", {}, "Waiting to join (" + team.invites.length + ")"),
+        h("div", { class: "list" }, team.invites.map(i => h("div", { class: "row team" },
+          h("b", {}, i.name),
+          h("span", { class: "sub hide-sm mono" }, i.email),
+          h("span", { class: "sub" }, ROLES[i.role].label + " · until " + expires(i.expiresAt)),
+          h("div", { class: "tools" }, owner && [
+            h("button", { class: "link", title: "Makes a new link. The old one stops working.", onclick: async () => {
+              err.textContent = "";
+              try { const out = await api("/api/team/invites", "POST", { name: i.name, email: i.email, role: i.role }); await refresh(); linkDialog(out); }
+              catch (ex) { err.textContent = ex.message; }
+            } }, "New link"),
+            h("button", { class: "link danger", onclick: () => confirmDelete("Cancel the invite for " + i.name + "? Their link stops working.", "/api/team/invites/" + i.id) }, "Cancel")]))))) : null,
+      h("div", { class: "group" },
+        h("h2", {}, "What each role can do"),
+        h("ul", { class: "roles" }, ROLES.map(r => h("li", {}, h("b", {}, r.label + ": "), r.about)))));
+  }
+
+  function inviteDialog() {
+    dialog("Invite someone", [
+      h("label", {}, "Name", h("input", { name: "name", required: true, maxlength: 200, placeholder: "Frank Ruiz" })),
+      h("label", {}, "Email", h("input", { name: "email", type: "email", required: true, placeholder: "frank@example.com" })),
+      h("label", {}, "Role", h("select", { name: "role" },
+        ROLES.map((r, i) => h("option", { value: i, selected: i === 2 ? "" : false }, r.label + " — " + r.about))))
+    ], "Create invite link", async (f) => {
+      const out = await api("/api/team/invites", "POST", { name: f.name, email: f.email, role: +f.role });
+      linkDialog(out);
+    });
+  }
+
+  // Shows the join link once. It isn't stored, so "New link" makes another.
+  function linkDialog(out) {
+    const link = location.href.split("#")[0] + "#join=" + out.code;
+    const first = out.invite.name.split(" ")[0];
+    const msg = "You're invited to join our team on BuildFree. Set up your login here: " + link;
+    const input = h("input", { value: link, readonly: "", class: "mono", "aria-label": "Join link", onfocus: (e) => e.target.select() });
+    const copyBtn = h("button", { class: "btn", type: "button", onclick: async () => {
+      try { await navigator.clipboard.writeText(link); } catch { input.focus(); input.select(); document.execCommand("copy"); }
+      copyBtn.textContent = "Copied";
+    } }, "Copy link");
+    const dlg = h("dialog", {}, h("div", { class: "dlg" },
+      h("h2", {}, "Send this link to " + first),
+      h("p", { class: "sub", style: "margin:0" }, "Text or email it to " + first + ". It works once and expires in 7 days. You won’t see this link again, but you can make a new one from the Team page."),
+      input,
+      h("div", { class: "actions" },
+        h("a", { class: "btn ghost", href: "sms:?&body=" + encodeURIComponent(msg) }, "Text it"),
+        h("a", { class: "btn ghost", href: "mailto:" + encodeURIComponent(out.invite.email) + "?subject=" + encodeURIComponent("Join our team on BuildFree") + "&body=" + encodeURIComponent(msg) }, "Email it"),
+        copyBtn,
+        h("button", { class: "btn ghost", type: "button", onclick: () => dlg.close() }, "Done"))));
+    dlg.addEventListener("close", () => dlg.remove());
+    document.body.append(dlg); dlg.showModal();
   }
 
   /* ---------- Dialogs ---------- */
@@ -606,10 +745,14 @@
   function mount(node) { const root = document.getElementById("app"); root.replaceChildren(node); }
   function render() { mount(token ? appView() : authView()); }
 
-  (async function start() {
+  async function start() {
+    const code = joinCode();
+    if (code) { mount(await joinView(code)); return; }
     if (token) { try { await loadData(); } catch { token = null; store.set(null); } }
     render();
-  })();
+  }
+  window.addEventListener("hashchange", () => { if (joinCode()) start(); });
+  start();
 </script>
 </body>
 </html>

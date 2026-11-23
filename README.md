@@ -10,7 +10,7 @@ I'm building it in public while I learn to code. Weekly notes live in the `devlo
 
 ## Milestone 1
 
-Sign up and log in, create clients and projects, and post daily logs with job photos. Good enough to run on one real job. All of this works now: sign up, log in, clients, jobs, daily logs with photos, and to-dos.
+Sign up and log in, create clients and projects, and post daily logs with job photos. Good enough to run on one real job. All of this works now: sign up, log in, clients, jobs, daily logs with photos, to-dos, and team members with roles.
 
 ## Later
 
@@ -67,12 +67,34 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | GET | `/api/todos` | All to-dos for the company |
 | PUT, DELETE | `/api/todos/{id}` | Edit or delete a to-do |
 | POST | `/api/todos/{id}/toggle` | Mark a to-do done or not done |
+| GET | `/api/me` | Who is logged in: name, email, role and company |
+| GET | `/api/team` | Everyone on the team, plus invites that haven't been used yet |
+| POST | `/api/team/invites` | Owner only. Invite someone by name, email and role; returns a one-time join code |
+| DELETE | `/api/team/invites/{id}` | Owner only. Cancel an invite |
+| PUT | `/api/team/{userId}/role` | Owner only. Change someone's role: 0 Owner, 1 Office, 2 Field |
+| DELETE | `/api/team/{userId}` | Owner only. Remove someone; they're locked out right away and their logs and photos stay |
+| GET | `/api/invites/{code}` | No login needed. What the join screen shows: company, name, email, role |
+| POST | `/api/auth/accept-invite` | No login needed. Set a name and password from an invite code; returns a token |
 
 ## Photos
 
 Photos attach to daily logs. The API accepts JPEG, PNG, GIF and WebP, checked by the file's contents rather than its name. Limits: 10 MB per photo, 10 photos per upload, 30 per log. The web app shrinks phone photos to at most 2,000 pixels on the long side before uploading (usually a few hundred KB), turns them upright, and uploads them in groups of 10.
 
 Uploaded files go in `BuildFree.Api/photo-uploads/` by default (ignored by git). Set `Photos:Path` in configuration, or the `Photos__Path` environment variable, to use another folder. If your local database was created before photos existed, reset it once with `docker compose down -v` then `docker compose up -d` so the photos table gets created.
+
+## Team members
+
+Each person gets their own login. Whoever signs up is the company's owner. The owner invites people from the Team tab by name, email and role, and gets a join link to text or email them (BuildFree doesn't send email yet). The link works once and expires after 7 days. Only a fingerprint (SHA-256 hash) of the code is stored, so a lost link can't be shown again; the owner makes a new one instead.
+
+| Role | Can do |
+|---|---|
+| Owner | Everything, including inviting people, changing roles and removing people |
+| Office | Jobs, clients, daily logs, photos and to-dos. Can't manage the team |
+| Field | Sees every job. Adds daily logs, photos and to-dos, and edits or deletes only the logs and photos they added |
+
+The API checks the user on every request, so a role change or removal takes effect immediately, even though the old login token hasn't expired. A company always keeps at least one owner. Daily logs and photos record who added them.
+
+If your local database was created before team members existed, reset it once with `docker compose down -v` then `docker compose up -d` so the new tables and columns get created.
 
 ## Tests
 

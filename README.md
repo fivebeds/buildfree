@@ -55,7 +55,7 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | GET, POST | `/api/clients` | List or add clients |
 | PUT, DELETE | `/api/clients/{id}` | Edit or delete a client (their jobs are kept) |
 | GET, POST | `/api/projects` | List or add jobs |
-| GET, PUT, DELETE | `/api/projects/{id}` | Get, edit or delete a job (deleting removes its logs, photos and to-dos) |
+| GET, PUT, DELETE | `/api/projects/{id}` | Get, edit or delete a job. Deleting removes its logs, photos, to-dos and drafts; a job with approved or sent documents can't be deleted |
 | PUT | `/api/projects/{id}/status` | Set status: 0 Planning, 1 Active, 2 On hold, 3 Complete |
 | GET, POST | `/api/projects/{id}/logs` | List or add daily logs for a job |
 | PUT, DELETE | `/api/logs/{id}` | Edit or delete a daily log (deleting removes its photos) |
@@ -142,7 +142,11 @@ It needs `curl` and `jq`. GitHub runs it automatically on every pull request (se
 
 ## Database migrations
 
-Right now the API creates its tables directly on startup, which can't change tables later without losing data. To switch to migrations (one time, on your computer):
+Until the project has a migration, the API creates its tables directly on startup. That's fine on your computer, but it can't change tables later without losing data, so the first migration has to exist before BuildFree goes online. After that, the API upgrades the database on startup and keeps existing data.
+
+**Create a migration on GitHub (no .NET needed on your computer):** go to the Actions tab, pick "Create database migration", click "Run workflow", choose the branch with your model changes, type a name (`InitialCreate` for the first one, then names like `AddSchedule`), and run it. It generates the migration, starts the API with it on an empty PostgreSQL database, runs `tests/smoke.sh`, then pushes the files to a new branch and opens a pull request. If GitHub won't let the workflow open the pull request, turn on Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests", or open one yourself from the branch it printed. Pull requests opened by the workflow don't start the regular checks by themselves; the workflow already ran them.
+
+**Or on your computer:**
 
 ```
 dotnet tool install --global dotnet-ef
@@ -150,7 +154,14 @@ cd BuildFree.Api
 dotnet ef migrations add InitialCreate
 ```
 
-Commit the new `Migrations` folder. From then on the API upgrades the database on startup and keeps existing data. When a model changes, run `dotnet ef migrations add <Name>` again. If your local database was created before migrations, reset it once with `docker compose down -v` then `docker compose up -d`.
+Once a `Migrations` folder exists, the regular checks on every pull request fail if a model changed without a new migration, so the online database can always be upgraded. If your local database was created before migrations, reset it once with `docker compose down -v` then `docker compose up -d`.
+
+## Keeping records safe
+
+- A job with an approved estimate or change order, or an invoice that went out (sent, paid or void), can't be deleted. Mark it Complete instead. Jobs with only drafts can still be deleted.
+- Approved estimates and change orders can't be deleted, and sent invoices can't be deleted (void them instead). Invoices with payments can't be edited, voided or deleted.
+- Estimate, change order and invoice numbers stay unique even when two people create one at the same moment; the API quietly picks the next number and tries again.
+- Unexpected errors come back as a short message (`{"error": "..."}`) and the details go to the API log. Requests the API can't read, like broken JSON, get a clear 400.
 
 ## Configuration
 

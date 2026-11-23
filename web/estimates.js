@@ -1,5 +1,7 @@
-// Estimates: the panel on a job, the line-item editor and the printable
-// customer copy. Loaded by index.html, and uses its helpers (h, api, refresh).
+// Estimates and change orders: the panels on a job, the line-item editor and
+// the printable customer copy. Loaded by index.html, and uses its helpers
+// (h, api, refresh). Change orders work like estimates, with their own
+// numbering, optional days added to the schedule, and credits (negative cost).
 // Line items are entered at cost; the customer price is cost plus the
 // estimate's markup. Tax applies to materials lines only. The API does the
 // final math; the editor shows the same math live while you type.
@@ -12,8 +14,11 @@ const EST_STATUS = [
 ];
 const EST_CATEGORY = ["Labor", "Materials", "Subcontractor", "Equipment", "Other"];
 const MATERIALS = 1;
+const CHANGE_ORDER = 1;
+const kindName = (kind) => kind === CHANGE_ORDER ? "Change order" : "Estimate";
 const money = (n) => (n || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
-const cents = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+// Rounds to the cent, halves away from zero (same as the API), so credits round like charges.
+const cents = (n) => (Math.sign(n) * Math.round((Math.abs(n) + Number.EPSILON) * 100) / 100) || 0;
 const num = (v) => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
 
 // Same math as the API (Estimates.cs).
@@ -30,31 +35,59 @@ function estimateTotals(d) {
   return { lines, subtotal, tax, total: cents(subtotal + tax), cost, profit, marginPercent: subtotal > 0 ? Math.round(profit / subtotal * 1000) / 10 : 0 };
 }
 
-/* ---------- Panel on the job page ---------- */
+/* ---------- Panels on the job page ---------- */
+function docRows(list, prefix) {
+  return list.map(e => {
+    const s = EST_STATUS[e.status] || EST_STATUS[0];
+    return h("button", { class: "estrow", type: "button", onclick: () => { estimateOpen = e.id; render(); } },
+      h("span", {}, h("b", {}, prefix + e.number + " " + e.title),
+        h("span", { class: "badge sub", style: "--c:" + s.color }, s.label)),
+      h("span", { class: "mono" }, money(e.total)));
+  });
+}
+
 function estimatesPanel(p) {
   return h("div", { class: "panel" },
     h("div", { class: "todorow" }, h("h2", {}, "Estimates"),
       h("button", { class: "link", type: "button", onclick: () => { estimateOpen = "new"; render(); } }, "New estimate")),
     estimates.length
-      ? estimates.map(e => {
-          const s = EST_STATUS[e.status] || EST_STATUS[0];
-          return h("button", { class: "estrow", type: "button", onclick: () => { estimateOpen = e.id; render(); } },
-            h("span", {}, h("b", {}, "#" + e.number + " " + e.title),
-              h("span", { class: "badge sub", style: "--c:" + s.color }, s.label)),
-            h("span", { class: "mono" }, money(e.total)));
-        })
+      ? docRows(estimates, "#")
       : h("p", { class: "sub" }, "No estimates yet. Price out the job with labor, materials and subs."));
+}
+
+// The contract summary (approved estimate plus approved changes) and the
+// job's change orders.
+function changeOrdersPanel(p) {
+  const c = contract || {};
+  const signed = (n) => (n > 0 ? "+" : "") + money(n);
+  return h("div", { class: "panel" },
+    h("div", { class: "todorow" }, h("h2", {}, "Change orders"),
+      h("button", { class: "link", type: "button", onclick: () => { estimateOpen = "new-co"; render(); } }, "New change order")),
+    h("div", { class: "stack", style: "gap:6px" },
+      h("div", { class: "trow" }, h("span", {}, c.original != null ? "Original (estimate #" + c.estimateNumber + ")" : "Original"),
+        h("span", { class: "mono" }, c.original != null ? money(c.original) : "No approved estimate")),
+      h("div", { class: "trow" }, h("span", {}, "Approved changes (" + (c.approvedCount || 0) + ")"), h("span", { class: "mono" }, signed(c.approvedChanges || 0))),
+      h("div", { class: "trow big" }, h("span", {}, "Revised contract"), h("span", { class: "mono" }, money(c.revised || 0))),
+      c.pendingCount ? h("div", { class: "trow sub" }, h("span", {}, "Waiting on approval (" + c.pendingCount + ")"), h("span", { class: "mono" }, signed(c.pendingChanges))) : null,
+      c.daysAdded ? h("div", { class: "trow sub" }, h("span", {}, "Schedule"), h("span", {}, (c.daysAdded > 0 ? "+" : "") + c.daysAdded + " days")) : null),
+    changeOrders.length ? docRows(changeOrders, "CO #") : h("p", { class: "sub", style: "margin:0" }, "No change orders yet. Add one when the scope or price changes after the estimate is approved."));
 }
 
 /* ---------- Editor ---------- */
 function estimateEditor(p) {
-  const saved = estimateOpen === "new" ? null : estimates.find(e => e.id === estimateOpen);
-  if (!saved && estimateOpen !== "new") { estimateOpen = null; return jobDetail(p); }
-  const last = estimates[0];
+  const isNew = estimateOpen === "new" || estimateOpen === "new-co";
+  const saved = isNew ? null : estimates.concat(changeOrders).find(e => e.id === estimateOpen);
+  if (!saved && !isNew) { estimateOpen = null; return jobDetail(p); }
+  const kind = saved ? saved.kind : estimateOpen === "new-co" ? CHANGE_ORDER : 0;
+  const isCO = kind === CHANGE_ORDER;
+  const noun = kindName(kind);
+  // New documents start from the approved estimate's markup and tax, or the latest estimate's.
+  const base = estimates.find(e => contract && e.id === contract.estimateId) || estimates[0];
   const d = saved
-    ? { title: saved.title, notes: saved.notes || "", markupPercent: saved.markupPercent, taxPercent: saved.taxPercent,
+    ? { title: saved.title, notes: saved.notes || "", markupPercent: saved.markupPercent, taxPercent: saved.taxPercent, daysAdded: saved.daysAdded ?? "",
         items: saved.items.map(i => ({ description: i.description, category: i.category, quantity: i.quantity, unit: i.unit || "", unitCost: i.unitCost })) }
-    : { title: p.name, notes: last ? last.notes || "" : "", markupPercent: last ? last.markupPercent : 20, taxPercent: last ? last.taxPercent : 0,
+    : { title: isCO ? "" : p.name, notes: !isCO && base ? base.notes || "" : "", daysAdded: "",
+        markupPercent: base ? base.markupPercent : 20, taxPercent: base ? base.taxPercent : 0,
         items: [{ description: "", category: 0, quantity: 1, unit: "", unitCost: "" }] };
   const locked = !!saved && saved.status === 2;
   let dirty = false;
@@ -96,7 +129,7 @@ function estimateEditor(p) {
           EST_CATEGORY.map((c, i) => h("option", { value: i, selected: +it.category === i ? "" : false }, c)))),
         input("quantity", { type: "number", min: 0, step: "any", placeholder: "Qty", "aria-label": "Quantity, line " + (n + 1), class: "cell-qty" }),
         input("unit", { placeholder: "ea", maxlength: 20, "aria-label": "Unit, line " + (n + 1), class: "cell-unit" }),
-        input("unitCost", { type: "number", min: 0, step: "0.01", placeholder: "Unit cost", "aria-label": "Unit cost, line " + (n + 1), class: "cell-cost" }),
+        input("unitCost", { type: "number", min: isCO ? false : 0, step: "0.01", placeholder: "Unit cost", "aria-label": "Unit cost, line " + (n + 1), class: "cell-cost" }),
         r.price, r.amount,
         locked ? h("span") : h("button", { class: "x", type: "button", title: "Remove line", "aria-label": "Remove line " + (n + 1), onclick: () => {
           d.items.splice(n, 1); dirty = true; drawLines();
@@ -113,9 +146,11 @@ function estimateEditor(p) {
     err.textContent = "";
     const body = {
       title: d.title, notes: d.notes || null, markupPercent: num(d.markupPercent), taxPercent: num(d.taxPercent),
+      daysAdded: isCO && String(d.daysAdded).trim() !== "" ? Math.round(num(d.daysAdded)) : null,
       items: d.items.map(i => ({ description: i.description, category: +i.category, quantity: num(i.quantity), unit: i.unit || null, unitCost: num(i.unitCost) }))
     };
-    const out = saved ? await api("/api/estimates/" + saved.id, "PUT", body) : await api("/api/projects/" + p.id + "/estimates", "POST", body);
+    const out = saved ? await api("/api/estimates/" + saved.id, "PUT", body)
+      : await api("/api/projects/" + p.id + (isCO ? "/change-orders" : "/estimates"), "POST", body);
     dirty = false; estimateOpen = out.id;
     return out;
   };
@@ -135,34 +170,37 @@ function estimateEditor(p) {
   drawLines();
   return h("div", {},
     h("button", { class: "link", type: "button", onclick: back, style: "margin-bottom:12px" }, "← Back to " + p.name),
-    h("div", { class: "head" }, h("h1", {}, saved ? "Estimate #" + saved.number : "New estimate"),
+    h("div", { class: "head" }, h("h1", {}, saved ? noun + " #" + saved.number : "New " + noun.toLowerCase()),
       h("div", { class: "headtools" }, status,
         saved && h("button", { class: "btn ghost", type: "button", onclick: run(async () => {
           if (dirty && !locked) { await save(); await refresh(); }
-          printEstimate(estimates.find(e => e.id === estimateOpen), p);
+          printEstimate(estimates.concat(changeOrders).find(e => e.id === estimateOpen), p);
         }) }, "Print"),
         saved && h("button", { class: "btn ghost", type: "button", onclick: run(async () => {
           if (dirty && !confirm("Copy the last saved version? Your unsaved changes won’t be in the copy.")) return;
           const out = await api("/api/estimates/" + saved.id + "/copy", "POST"); estimateOpen = out.id; await refresh();
         }) }, "Copy"),
-        saved && h("button", { class: "btn ghost", type: "button", onclick: () => confirmDelete("Delete estimate #" + saved.number + "? This can’t be undone.", "/api/estimates/" + saved.id, () => { estimateOpen = null; }) }, "Delete"))),
-    locked ? h("p", { class: "sub" }, "This estimate is approved, so it’s locked. Make a copy to change it.") : null,
+        saved && h("button", { class: "btn ghost", type: "button", onclick: () => confirmDelete("Delete " + noun.toLowerCase() + " #" + saved.number + "? This can’t be undone.", "/api/estimates/" + saved.id, () => { estimateOpen = null; }) }, "Delete"))),
+    locked ? h("p", { class: "sub" }, "This " + noun.toLowerCase() + " is approved, so it’s locked. Make a copy to change it.") : null,
+    isCO && !saved && contract && contract.original == null ? h("p", { class: "sub" }, "Tip: approve the job’s estimate first, so this change adds to the original contract.") : null,
     h("div", { class: "estgrid" },
       h("div", { class: "panel" },
-        h("label", {}, "Title", lock(h("input", { value: d.title, maxlength: 200, oninput: (e) => { d.title = e.target.value; dirty = true; } }))),
+        h("label", {}, "Title", lock(h("input", { value: d.title, maxlength: 200, placeholder: isCO ? "What changed, e.g. Owner added 4 outlets in kitchen" : "", oninput: (e) => { d.title = e.target.value; dirty = true; } }))),
         h("div", { class: "inline" },
+          isCO && h("label", { style: "flex:1" }, "Days added to schedule", lock(h("input", { type: "number", step: 1, min: -365, max: 3650, placeholder: "0", value: d.daysAdded, oninput: (e) => { d.daysAdded = e.target.value; dirty = true; } }))),
           h("label", { style: "flex:1" }, "Markup %", lock(h("input", { type: "number", min: 0, max: 500, step: "any", value: d.markupPercent, oninput: (e) => { d.markupPercent = e.target.value; changed(); } }))),
           h("label", { style: "flex:1" }, "Sales tax % (materials)", lock(h("input", { type: "number", min: 0, max: 20, step: "any", value: d.taxPercent, oninput: (e) => { d.taxPercent = e.target.value; changed(); } })))),
         linesEl,
+        isCO && !locked ? h("p", { class: "sub", style: "margin:0;font-size:13px" }, "For work taken out, enter a negative unit cost to give the customer a credit.") : null,
         locked ? null : h("div", {}, h("button", { class: "btn ghost", type: "button", onclick: () => {
           d.items.push({ description: "", category: 0, quantity: 1, unit: "", unitCost: "" }); dirty = true; drawLines();
           const descs = linesEl.querySelectorAll(".cell-desc"); descs[descs.length - 1].focus();
         } }, "+ Add line")),
-        h("label", {}, "Notes for the customer", lock(Object.assign(h("textarea", { rows: 4, maxlength: 10000, placeholder: "Scope, exclusions, payment terms, how long the price is good for", oninput: (e) => { d.notes = e.target.value; dirty = true; } }), { value: d.notes }))),
+        h("label", {}, isCO ? "Reason and details for the customer" : "Notes for the customer", lock(Object.assign(h("textarea", { rows: 4, maxlength: 10000, placeholder: isCO ? "Why the change is needed, what’s added or removed, and anything the customer should know" : "Scope, exclusions, payment terms, how long the price is good for", oninput: (e) => { d.notes = e.target.value; dirty = true; } }), { value: d.notes }))),
         err,
         locked ? null : h("div", { class: "actions" },
           h("button", { class: "btn ghost", type: "button", onclick: back }, "Cancel"),
-          h("button", { class: "btn", type: "button", onclick: run(async () => { await save(); await refresh(); }) }, saved ? "Save changes" : "Create estimate"))),
+          h("button", { class: "btn", type: "button", onclick: run(async () => { await save(); await refresh(); }) }, saved ? "Save changes" : "Create " + noun.toLowerCase()))),
       totalsEl));
 }
 
@@ -171,11 +209,22 @@ function estimateEditor(p) {
 // where it can also be saved as a PDF.
 function printEstimate(e, p) {
   if (!e) return;
+  const isCO = e.kind === CHANGE_ORDER;
   const client = clients.find(c => c.id === p.clientId);
+  // For a change order: how it changes the contract the customer agreed to.
+  let summary = null;
+  if (isCO && contract && contract.original != null) {
+    const before = changeOrders.filter(c => c.status === 2 && c.id !== e.id).reduce((s, c) => s + c.total, 0);
+    summary = h("table", { class: "doc-summary" }, h("tbody", {},
+      h("tr", {}, h("td", {}, "Original contract (estimate #" + contract.estimateNumber + ")"), h("td", { class: "num" }, money(contract.original))),
+      h("tr", {}, h("td", {}, "Previously approved changes"), h("td", { class: "num" }, money(before))),
+      h("tr", {}, h("td", {}, "This change order"), h("td", { class: "num" }, money(e.total))),
+      h("tr", { class: "doc-total" }, h("td", {}, "New contract total"), h("td", { class: "num" }, money(contract.original + before + e.total)))));
+  }
   const page = h("div", { class: "doc" },
     h("div", { class: "doc-head" },
       h("div", {}, h("div", { class: "doc-company" }, (me && me.company) || ""), h("div", { class: "sub" }, me ? me.name + " · " + me.email : "")),
-      h("div", { style: "text-align:right" }, h("div", { class: "doc-title" }, "Estimate #" + e.number),
+      h("div", { style: "text-align:right" }, h("div", { class: "doc-title" }, (isCO ? "Change Order #" : "Estimate #") + e.number),
         h("div", { class: "sub" }, new Date(e.updatedAt).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })))),
     h("div", { class: "doc-parties" },
       h("div", {}, h("div", { class: "doc-label" }, "Prepared for"),
@@ -189,9 +238,11 @@ function printEstimate(e, p) {
         h("td", { class: "num" }, money(i.unitPrice)), h("td", { class: "num" }, money(i.amount))))),
       h("tfoot", {},
         h("tr", {}, h("td", { colspan: 4, class: "num" }, "Subtotal"), h("td", { class: "num" }, money(e.subtotal))),
-        e.tax > 0 ? h("tr", {}, h("td", { colspan: 4, class: "num" }, "Sales tax on materials (" + (+e.taxPercent) + "%)"), h("td", { class: "num" }, money(e.tax))) : null,
+        e.tax !== 0 ? h("tr", {}, h("td", { colspan: 4, class: "num" }, "Sales tax on materials (" + (+e.taxPercent) + "%)"), h("td", { class: "num" }, money(e.tax))) : null,
         h("tr", { class: "doc-total" }, h("td", { colspan: 4, class: "num" }, "Total"), h("td", { class: "num" }, money(e.total))))),
-    e.notes ? h("div", { class: "doc-notes" }, h("div", { class: "doc-label" }, "Notes"), h("p", {}, e.notes)) : null,
+    isCO && e.daysAdded ? h("p", { class: "doc-days" }, "Schedule: this change " + (e.daysAdded > 0 ? "adds " + e.daysAdded : "removes " + -e.daysAdded) + " day" + (Math.abs(e.daysAdded) === 1 ? "" : "s") + ".") : null,
+    summary,
+    e.notes ? h("div", { class: "doc-notes" }, h("div", { class: "doc-label" }, isCO ? "Reason and details" : "Notes"), h("p", {}, e.notes)) : null,
     h("div", { class: "doc-sign" },
       h("div", {}, h("span"), "Accepted by"), h("div", {}, h("span"), "Date")));
   const root = document.getElementById("print");

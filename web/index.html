@@ -163,6 +163,9 @@
   .doc tfoot td { border-bottom: 0; }
   .doc-total td { font-weight: 600; font-size: 13pt; border-top: 2px solid #000; }
   .doc-notes { margin-top: 18px; }
+  .doc-days { margin: 14px 0 0; }
+  .doc-summary { margin-top: 18px; width: 60% !important; margin-left: auto; }
+  .doc-summary td { border-bottom: 1px solid #ccc; }
   .doc-notes p { white-space: pre-wrap; margin: 0; }
   .doc-sign { display: grid; grid-template-columns: 2fr 1fr; gap: 32px; margin-top: 48px; }
   .doc-sign div { font-size: 10pt; color: #555; }
@@ -266,7 +269,7 @@
     return data;
   }
 
-  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; estimates = []; estimateOpen = null; clearPhotoCache(); render(); }
+  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; estimates = []; changeOrders = []; contract = null; estimateOpen = null; clearPhotoCache(); render(); }
 
   async function loadData() {
     [me, team, projects, clients, todos] = await Promise.all([api("/api/me"), api("/api/team"), api("/api/projects"), api("/api/clients"), api("/api/todos")]);
@@ -346,18 +349,22 @@
 
   /* ---------- App ---------- */
   let selected = null, logs = [], photos = [], jobQuery = "";
-  let estimates = [], estimateOpen = null; // estimateOpen: an estimate id, "new", or null
+  let estimates = [], changeOrders = [], contract = null;
+  let estimateOpen = null; // an estimate or change order id, "new", "new-co", or null
   const todayStr = () => new Date().toLocaleDateString("en-CA");
   const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "";
 
   async function refresh() {
     await loadData();
-    [logs, photos, estimates] = selected
+    const office = selected && canManage();
+    [logs, photos, estimates, changeOrders, contract] = selected
       ? await Promise.all([
           api("/api/projects/" + selected + "/logs").catch(() => []),
           api("/api/projects/" + selected + "/photos").catch(() => []),
-          canManage() ? api("/api/projects/" + selected + "/estimates").catch(() => []) : []])
-      : [[], [], []];
+          office ? api("/api/projects/" + selected + "/estimates").catch(() => []) : [],
+          office ? api("/api/projects/" + selected + "/change-orders").catch(() => []) : [],
+          office ? api("/api/projects/" + selected + "/contract").catch(() => null) : null])
+      : [[], [], [], [], null];
     render();
   }
   async function selectJob(id) { selected = id; estimateOpen = null; await refresh(); }
@@ -618,6 +625,7 @@
             thumbs(byLog(l.id), ordered))) : h("p", { class: "sub" }, "No logs yet.")),
         h("div", { class: "stack", style: "gap:20px" },
           canManage() ? estimatesPanel(p) : null,
+          canManage() ? changeOrdersPanel(p) : null,
           h("div", { class: "panel" }, h("h2", {}, "To-dos"), todoForm, todoErr,
             mine.length ? mine.map(t => todoRow(t)) : h("p", { class: "sub" }, "No to-dos yet.")),
           h("div", { class: "panel" }, h("h2", {}, "Photos (" + photos.length + ")"),

@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using BuildFree.Api;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 
@@ -47,7 +48,28 @@ builder.Services.AddSingleton<IPhotoStore>(new DiskPhotoStore(photosPath));
 builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
+// Requests the API can't read (broken JSON, a word where a number goes) are
+// turned into a clear 400 by the error handler below instead of an empty one.
+builder.Services.Configure<RouteHandlerOptions>(o => o.ThrowOnBadRequest = true);
+
 var app = builder.Build();
+
+// Unexpected errors come back as a short JSON message the web app can show;
+// the full details go to the log. The CORS header is added here too, because
+// the error handler clears the response and the browser would otherwise hide
+// the message.
+app.UseExceptionHandler(errors => errors.Run(async ctx =>
+{
+    var error = ctx.Features.Get<IExceptionHandlerFeature>()?.Error;
+    var (status, message) = error is BadHttpRequestException bad
+        ? (bad.StatusCode, bad.StatusCode == StatusCodes.Status413PayloadTooLarge
+            ? "That upload is too large. Try fewer or smaller photos."
+            : "The request couldn't be read. Check the fields and try again.")
+        : (StatusCodes.Status500InternalServerError, "Something went wrong on our side. Try again, and if it keeps happening, let us know.");
+    ctx.Response.StatusCode = status;
+    ctx.Response.Headers.AccessControlAllowOrigin = "*";
+    await ctx.Response.WriteAsJsonAsync(new { error = message });
+}));
 
 // Database setup on startup. Once a migration exists (see README), the
 // database is upgraded in place and keeps its data. Until then, tables are
@@ -362,12 +384,18 @@ projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal 
     return Results.Ok(project);
 }).AddEndpointFilter(OfficeOnly);
 
-// Deleting a job also deletes its daily logs, their photos and its to-dos.
+// Deleting a job also deletes its daily logs, their photos, its to-dos, and
+// its draft estimates and invoices. A job with an approved estimate or change
+// order, or an invoice that went out, holds real money records, so it can't
+// be deleted; mark it Complete instead.
 projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
 {
     var accountId = AccountId(me);
     var project = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
     if (project is null) return Results.NotFound();
+    if (await db.Estimates.AnyAsync(e => e.ProjectId == id && e.Status == EstimateStatus.Approved) ||
+        await db.Invoices.AnyAsync(i => i.ProjectId == id && i.Status != InvoiceStatus.Draft))
+        return Results.Conflict(new { error = "This job has an approved estimate or change order, or invoices that went out, so it can't be deleted. Mark it Complete instead, so its records are kept." });
     var photos = await db.Photos.Where(p => p.ProjectId == id && p.AccountId == accountId).ToListAsync();
     db.Photos.RemoveRange(photos);
     db.Logs.RemoveRange(await db.Logs.Where(l => l.ProjectId == id && l.AccountId == accountId).ToListAsync());

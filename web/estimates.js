@@ -39,7 +39,7 @@ function estimateTotals(d) {
 function docRows(list, prefix) {
   return list.map(e => {
     const s = EST_STATUS[e.status] || EST_STATUS[0];
-    return h("button", { class: "estrow", type: "button", onclick: () => { estimateOpen = e.id; render(); } },
+    return h("button", { class: "estrow", type: "button", onclick: () => { invoiceOpen = null; estimateOpen = e.id; render(); } },
       h("span", {}, h("b", {}, prefix + e.number + " " + e.title),
         h("span", { class: "badge sub", style: "--c:" + s.color }, s.label)),
       h("span", { class: "mono" }, money(e.total)));
@@ -49,7 +49,7 @@ function docRows(list, prefix) {
 function estimatesPanel(p) {
   return h("div", { class: "panel" },
     h("div", { class: "todorow" }, h("h2", {}, "Estimates"),
-      h("button", { class: "link", type: "button", onclick: () => { estimateOpen = "new"; render(); } }, "New estimate")),
+      h("button", { class: "link", type: "button", onclick: () => { invoiceOpen = null; estimateOpen = "new"; render(); } }, "New estimate")),
     estimates.length
       ? docRows(estimates, "#")
       : h("p", { class: "sub" }, "No estimates yet. Price out the job with labor, materials and subs."));
@@ -62,7 +62,7 @@ function changeOrdersPanel(p) {
   const signed = (n) => (n > 0 ? "+" : "") + money(n);
   return h("div", { class: "panel" },
     h("div", { class: "todorow" }, h("h2", {}, "Change orders"),
-      h("button", { class: "link", type: "button", onclick: () => { estimateOpen = "new-co"; render(); } }, "New change order")),
+      h("button", { class: "link", type: "button", onclick: () => { invoiceOpen = null; estimateOpen = "new-co"; render(); } }, "New change order")),
     h("div", { class: "stack", style: "gap:6px" },
       h("div", { class: "trow" }, h("span", {}, c.original != null ? "Original (estimate #" + c.estimateNumber + ")" : "Original"),
         h("span", { class: "mono" }, c.original != null ? money(c.original) : "No approved estimate")),

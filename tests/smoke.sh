@@ -78,7 +78,6 @@ call POST /api/auth/login "" "{\"email\":\"alpha$RUN@example.com\",\"password\":
 call POST /api/auth/signup "" "{\"companyName\":\"X\",\"name\":\"X\",\"email\":\"alpha$RUN@example.com\",\"password\":\"changeme123\"}" 409
 call POST /api/auth/signup "" "{\"companyName\":\"X\",\"name\":\"X\",\"email\":\"short$RUN@example.com\",\"password\":\"short\"}" 400
 call POST /api/auth/signup "" "{\"companyName\":\"X\",\"name\":\"X\",\"email\":\"not-an-email\",\"password\":\"changeme123\"}" 400
-call GET /api/projects "" "" 401
 
 echo "== Clients"
 call POST /api/clients "$A" '{"name":"Maria Lopez","email":"maria@example.com","phone":"619-555-0100"}' 201
@@ -132,6 +131,95 @@ TODO="$(field .id)"
 call PUT "/api/todos/$TODO" "$A" '{"title":"Order cabinets and hardware","dueDate":"2026-12-06"}' 200
 call POST "/api/todos/$TODO/toggle" "$A" "" 200
 [[ "$(field .done)" == "true" ]] || { echo "FAIL: toggle did not mark done"; exit 1; }
+
+echo "== Team members"
+call GET /api/me "$A" "" 200
+[[ "$(field .role)" == "0" && "$(field .company)" == "Alpha Builders" ]] || { echo "FAIL: signup user should be the owner"; exit 1; }
+AID="$(field .id)"
+call POST /api/team/invites "$A" "{\"name\":\"Olivia\",\"email\":\"office$RUN@example.com\",\"role\":1}" 201
+OCODE="$(field .code)"
+[[ "$(field .invite.codeHash)" == "null" ]] || { echo "FAIL: invite code hash leaked"; exit 1; }
+call POST /api/team/invites "$A" "{\"name\":\"Frank\",\"email\":\"field$RUN@example.com\",\"role\":2}" 201
+FCODE="$(field .code)"
+call POST /api/team/invites "$A" '{"name":"Nobody","email":"nope","role":2}' 400
+call POST /api/team/invites "$A" "{\"name\":\"Nobody\",\"email\":\"x$RUN@example.com\",\"role\":9}" 400
+call POST /api/team/invites "$A" "{\"name\":\"Ben\",\"email\":\"bravo$RUN@example.com\",\"role\":2}" 409
+call GET "/api/invites/$FCODE" "" "" 200
+[[ "$(field .company)" == "Alpha Builders" && "$(field .role)" == "2" ]] || { echo "FAIL: invite lookup wrong"; exit 1; }
+call GET /api/invites/not-a-real-code "" "" 404
+call POST /api/auth/accept-invite "" "{\"code\":\"$FCODE\",\"password\":\"short\"}" 400
+call POST /api/auth/accept-invite "" "{\"code\":\"$FCODE\",\"name\":\"Frank R\",\"password\":\"changeme123\"}" 200
+F="$(field .token)"
+call POST /api/auth/accept-invite "" "{\"code\":\"$FCODE\",\"password\":\"changeme123\"}" 404
+call POST /api/auth/accept-invite "" "{\"code\":\"$OCODE\",\"password\":\"changeme123\"}" 200
+O="$(field .token)"
+call GET /api/me "$F" "" 200
+[[ "$(field .role)" == "2" && "$(field .name)" == "Frank R" ]] || { echo "FAIL: field user wrong"; exit 1; }
+FID="$(field .id)"
+call POST /api/auth/login "" "{\"email\":\"field$RUN@example.com\",\"password\":\"changeme123\"}" 200
+call GET /api/team "$A" "" 200
+[[ "$(field '.members | length')" == "3" && "$(field '.invites | length')" == "0" ]] || { echo "FAIL: team list wrong"; exit 1; }
+
+echo "== Field crew can log work but can't manage jobs"
+call GET /api/projects "$F" "" 200
+[[ "$(field 'length')" == "1" ]] || { echo "FAIL: field user can't see the company's jobs"; exit 1; }
+call POST /api/clients "$F" '{"name":"Field client"}' 403
+call PUT "/api/clients/$CLIENT" "$F" '{"name":"Changed"}' 403
+call POST /api/projects "$F" '{"name":"Field job"}' 403
+call PUT "/api/projects/$JOB" "$F" '{"name":"Changed"}' 403
+call PUT "/api/projects/$JOB/status" "$F" '{"status":2}' 403
+call DELETE "/api/projects/$JOB" "$F" "" 403
+call POST /api/team/invites "$F" "{\"name\":\"X\",\"email\":\"y$RUN@example.com\",\"role\":0}" 403
+call POST "/api/projects/$JOB/logs" "$F" '{"notes":"Framing walls","crewCount":2}' 201
+FLOG="$(field .id)"
+[[ "$(field .author)" == "Frank R" ]] || { echo "FAIL: log author wrong"; exit 1; }
+call PUT "/api/logs/$FLOG" "$F" '{"notes":"Framing walls, half done","crewCount":2}' 200
+call PUT "/api/logs/$LOG" "$F" '{"notes":"Changed"}' 403
+call DELETE "/api/logs/$LOG" "$F" "" 403
+upload "/api/logs/$FLOG/photos" "$F" 201 "$PNG"
+FPHOTO="$(field '.[0].id')"
+call PUT "/api/photos/$FPHOTO" "$F" '{"caption":"West wall"}' 200
+call PUT "/api/photos/$PHOTO" "$F" '{"caption":"Changed"}' 403
+call POST "/api/todos/$TODO/toggle" "$F" "" 200
+call PUT "/api/logs/$FLOG" "$A" '{"notes":"Framing walls (checked)","crewCount":2}' 200
+
+echo "== Office staff manage jobs but not the team"
+call POST /api/clients "$O" '{"name":"Office client"}' 201
+OCLIENT="$(field .id)"
+call DELETE "/api/clients/$OCLIENT" "$O" "" 204
+call PUT "/api/photos/$FPHOTO" "$O" '{"caption":"West wall framing"}' 200
+call POST /api/team/invites "$O" "{\"name\":\"X\",\"email\":\"z$RUN@example.com\",\"role\":2}" 403
+call PUT "/api/team/$FID/role" "$O" '{"role":1}' 403
+
+echo "== Owner manages roles"
+call GET /api/team "$B" "" 200
+[[ "$(field '.members | length')" == "1" ]] || { echo "FAIL: company B can see company A's team"; exit 1; }
+call PUT "/api/team/$FID/role" "$B" '{"role":0}' 404
+call DELETE "/api/team/$FID" "$B" "" 404
+call PUT "/api/team/$FID/role" "$A" '{"role":1}' 200
+call POST /api/clients "$F" '{"name":"Now allowed"}' 201
+call DELETE "/api/clients/$(field .id)" "$F" "" 204
+call PUT "/api/team/$FID/role" "$A" '{"role":2}' 200
+call POST /api/clients "$F" '{"name":"Blocked again"}' 403
+call PUT "/api/team/$AID/role" "$A" '{"role":1}' 400
+call DELETE "/api/team/$AID" "$A" "" 400
+call PUT "/api/team/$AID/role" "$A" '{"role":9}' 400
+call POST /api/team/invites "$A" "{\"name\":\"Temp\",\"email\":\"temp$RUN@example.com\",\"role\":2}" 201
+TCODE="$(field .code)"
+call POST /api/team/invites "$A" "{\"name\":\"Temp\",\"email\":\"temp$RUN@example.com\",\"role\":1}" 201
+OLDCODE="$TCODE"
+TCODE="$(field .code)"
+call GET "/api/invites/$OLDCODE" "" "" 404
+call GET /api/team "$A" "" 200
+[[ "$(field '.invites | length')" == "1" ]] || { echo "FAIL: re-invite should replace the old invite"; exit 1; }
+TINV="$(field '.invites[0].id')"
+call DELETE "/api/team/invites/$TINV" "$A" "" 204
+call POST /api/auth/accept-invite "" "{\"code\":\"$TCODE\",\"password\":\"changeme123\"}" 404
+call DELETE "/api/team/$FID" "$A" "" 204
+call GET /api/projects "$F" "" 401
+call POST /api/auth/login "" "{\"email\":\"field$RUN@example.com\",\"password\":\"changeme123\"}" 401
+call GET "/api/projects/$JOB/logs" "$A" "" 200
+[[ "$(field 'length')" == "2" ]] || { echo "FAIL: removed member's log should stay"; exit 1; }
 
 echo "== Company B can't see or change company A's data"
 call GET /api/projects "$B" "" 200

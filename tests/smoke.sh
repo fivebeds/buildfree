@@ -475,6 +475,7 @@ call GET "/api/projects/$JOB" "$A" "" 200
 [[ "$(field .clientId)" == "null" ]] || { echo "FAIL: job still points at deleted client"; exit 1; }
 call POST "/api/projects/$JOB/logs" "$A" '{"notes":"Second log"}' 201
 LOG2="$(field .id)"
+[[ "$(field .date)" == "$(TZ=America/Los_Angeles date +%F)" ]] || { echo "FAIL: a log without a date should get today's date in Pacific time: $BODY"; exit 1; }
 upload "/api/logs/$LOG2/photos" "$A" 201 "$PNG"
 PHOTO3="$(field '.[0].id')"
 call POST "/api/projects/$JOB/todos" "$A" '{"title":"Second to-do"}' 201

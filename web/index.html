@@ -34,7 +34,7 @@
   .logo { font-weight: 600; font-size: 16px; letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; }
   .logo i { width: 0; height: 0; border-left: 9px solid transparent; border-right: 9px solid transparent; border-bottom: 16px solid var(--text); }
   .tabs { display: flex; gap: 4px; flex: 1; }
-  .tab { background: none; border: 0; padding: 6px 12px; border-radius: 6px; color: var(--muted); cursor: pointer; }
+  .tab { background: none; border: 0; padding: 6px 12px; border-radius: 6px; color: var(--muted); cursor: pointer; white-space: nowrap; }
   .tab:hover { background: var(--hover); color: var(--text); }
   .tab[aria-current="page"] { color: var(--text); background: var(--hover); font-weight: 500; }
 
@@ -111,6 +111,7 @@
   .headtools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .inline { display: flex; gap: 8px; }
   .inline input { flex: 1; min-width: 0; }
+  .todoform input[type=date] { flex: 0 0 140px; }
   .group { margin-top: 28px; }
   .group h2 { font-size: 13px; color: var(--muted); font-weight: 500; margin: 0 0 8px; }
   .group h2.late { color: var(--err); }
@@ -197,8 +198,15 @@
     .head { flex-wrap: wrap; }
     .row.th { display: none; }
     .hide-sm { display: none; }
-    .bar { gap: 12px; }
+    .bar { gap: 12px; padding: 0 16px; }
+    .tab { padding: 6px 8px; }
+    /* Forms in a row wrap onto two lines instead of squeezing their boxes. */
+    .wrap-sm { flex-wrap: wrap; }
+    .wrap-sm > input, .todoform input[type=date] { flex: 1 1 140px; }
+    .wrap-sm > .btn { flex: 1 0 auto; }
+    .todoform input[name=title] { flex-basis: 100%; }
   }
+  @media (max-width: 420px) { .top .logo .name { display: none; } }
 </style>
 </head>
 <body>
@@ -415,7 +423,7 @@
     const tab = (id, text) => h("button", { class: "tab", "aria-current": view === id ? "page" : false, onclick: () => { view = id; render(); } }, text);
     return h("div", {},
       h("div", { class: "top" }, h("div", { class: "bar wide" },
-        h("div", { class: "logo" }, h("i"), "BuildFree"),
+        h("div", { class: "logo", "aria-label": "BuildFree" }, h("i"), h("span", { class: "name" }, "BuildFree")),
         h("div", { class: "tabs" }, tab("jobs", "Jobs"), tab("clients", "Clients"), tab("team", "Team")),
         h("button", { class: "tab", onclick: logout }, "Log out"))),
       view === "jobs" ? jobsView() : h("main", {}, view === "team" ? teamView() : clientsView()));
@@ -616,7 +624,7 @@
       }
     } },
       h("textarea", { name: "notes", required: true, rows: 3, placeholder: "What happened on site today?" }),
-      h("div", { class: "inline" },
+      h("div", { class: "inline wrap-sm" },
         h("input", { name: "date", type: "date", value: todayStr() }),
         h("input", { name: "crew", type: "number", min: 0, placeholder: "Crew on site" }),
         h("button", { class: "btn", type: "submit" }, "Add log")),
@@ -638,14 +646,14 @@
       thumbs(byLog(l.id), ordered)]);
 
     const todoErr = h("p", { class: "err", role: "alert" });
-    const todoForm = h("form", { class: "inline", onsubmit: async (e) => {
+    const todoForm = h("form", { class: "inline wrap-sm todoform", onsubmit: async (e) => {
       e.preventDefault(); todoErr.textContent = "";
       const f = Object.fromEntries(new FormData(todoForm));
       try { await api("/api/projects/" + p.id + "/todos", "POST", { title: f.title, dueDate: f.dueDate || null }); await refresh(); }
       catch (ex) { todoErr.textContent = ex.message; }
     } },
       h("input", { name: "title", required: true, placeholder: "New to-do" }),
-      h("input", { name: "dueDate", type: "date", style: "flex:0 0 140px" }),
+      h("input", { name: "dueDate", type: "date", "aria-label": "Due date" }),
       h("button", { class: "btn", type: "submit" }, "Add"));
 
     return h("div", {},

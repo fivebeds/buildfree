@@ -546,8 +546,8 @@ projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal 
     return Results.Ok(project);
 }).AddEndpointFilter(OfficeOnly);
 
-// Deleting a job also deletes its daily logs, their photos, its to-dos, and
-// its draft estimates and invoices. A job with an approved estimate or change
+// Deleting a job also deletes its daily logs, their photos, its to-dos, its
+// schedule, and its draft estimates and invoices. A job with an approved estimate or change
 // order, or an invoice that went out, holds real money records, so it can't
 // be deleted; mark it Complete instead.
 projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
@@ -954,9 +954,11 @@ team.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx
     var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id && u.AccountId == accountId);
     if (user is null) return Results.NotFound();
     db.Users.Remove(user);
-    // They no longer manage any jobs.
+    // They no longer manage any jobs or have schedule items assigned.
     var managed = await db.Projects.Where(p => p.AccountId == accountId && p.ManagerIds.Contains(id)).ToListAsync();
     foreach (var job in managed) job.ManagerIds = job.ManagerIds.Where(m => m != id).ToList();
+    var assigned = await db.ScheduleItems.Where(i => i.AccountId == accountId && i.AssigneeIds.Contains(id)).ToListAsync();
+    foreach (var item in assigned) item.AssigneeIds = item.AssigneeIds.Where(a => a != id).ToList();
     Feed.Add(db, Me(ctx), "team", $"removed {user.Name} from the team");
     await db.SaveChangesAsync();
     return Results.NoContent();
@@ -1040,10 +1042,11 @@ app.MapPost("/api/auth/reset-password", async (PasswordResetRequest r, AppDbCont
     return Results.Ok(new { token = MakeToken(user) });
 }).RequireRateLimiting("auth");
 
-// ---------- Estimates, change orders and invoices (see Estimates.cs, Invoices.cs) ----------
+// ---------- Estimates, change orders, invoices, activity and the schedule (see their own files) ----------
 
 app.MapEstimates();
 app.MapInvoices();
 app.MapActivity();
+app.MapSchedule();
 
 app.Run();

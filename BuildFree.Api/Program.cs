@@ -575,7 +575,7 @@ projects.MapPost("/{id:guid}/logs", async (Guid id, LogRequest r, ClaimsPrincipa
         ProjectId = id,
         Author = Me(ctx).Name,
         AuthorId = Me(ctx).Id,
-        Date = r.Date ?? DateOnly.FromDateTime(DateTime.UtcNow),
+        Date = r.Date ?? Clock.Today(),
         Notes = Clean(r.Notes)!,
         CrewCount = r.CrewCount
     };

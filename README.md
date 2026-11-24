@@ -75,6 +75,10 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | DELETE | `/api/team/{userId}` | Owner only. Remove someone; they're locked out right away and their logs and photos stay |
 | GET | `/api/invites/{code}` | No login needed. What the join screen shows: company, name, email, role |
 | POST | `/api/auth/accept-invite` | No login needed. Set a name and password from an invite code; returns a token |
+| PUT | `/api/me/password` | Change your own password (current and new password). Returns a new token and logs you out on every other device |
+| POST | `/api/team/{userId}/reset-link` | Owner only. Make a password reset code for someone on the team; it works once and expires in 24 hours |
+| GET | `/api/password-resets/{code}` | No login needed. What the reset screen shows: company, name, email |
+| POST | `/api/auth/reset-password` | No login needed. Set a new password from a reset code; returns a token |
 | GET, POST | `/api/projects/{id}/estimates` | Owner and office only. List a job's estimates with totals, or create one |
 | GET, PUT, DELETE | `/api/estimates/{id}` | Owner and office only. Get, save (details plus the full list of line items) or delete an estimate |
 | PUT | `/api/estimates/{id}/status` | Set status: 0 Draft, 1 Sent, 2 Approved, 3 Declined |
@@ -130,6 +134,17 @@ The API checks the user on every request, so a role change or removal takes effe
 
 If your local database was created before team members existed, reset it once with `docker compose down -v` then `docker compose up -d` so the new tables and columns get created.
 
+## Security
+
+- **Password guessing:** after 5 wrong passwords for one email in 15 minutes, logins for that email are refused until the 15 minutes are up. On top of that, one network gets 60 tries a minute at logging in, signing up, invite and reset links, and changing passwords (`RateLimits:AuthPerMinute`). Both reset when the API restarts.
+- **Passwords:** 8 to 72 characters (BCrypt, which stores them, only uses the first 72 bytes). Logins take the same time whether or not the email is registered.
+- **Forgotten passwords:** the owner opens the Team tab, clicks Reset password next to the person, and texts or emails them the link. It works once and expires in 24 hours. An owner who forgets their own password needs another owner to do this until BuildFree can send email.
+- **Changing a password** (Team tab, Change password next to your name) or resetting it logs that person out on every other device. Every login token carries a fingerprint of the password, and the API checks it on each request.
+- **Which websites can call the API:** set `Cors:Origins` to the web app's address. Outside development with nothing set, no other website can call it.
+- Every response tells browsers not to guess file types, not to show the API inside another site, and not to send the page address along.
+
+Before going online behind a hosting provider's proxy, the API has to be told to trust the proxy's forwarded address, or every visitor shares one network limit. That's part of hosting prep.
+
 ## Tests
 
 `tests/smoke.sh` runs through every endpoint against a running API, using two test companies to check that one can never see or change the other's data. With the API running:
@@ -165,7 +180,9 @@ Once a `Migrations` folder exists, the regular checks on every pull request fail
 
 ## Configuration
 
-`Jwt:Key` in `appsettings.json` is a sample for local development only. Outside development the API refuses to start with it; set a real random key of 32+ characters with the `Jwt__Key` environment variable.
+`Jwt:Key` in `appsettings.json` is a sample for local development only. Outside development the API refuses to start with it; set a real random key of 32+ characters with the `Jwt__Key` environment variable. Changing the key logs everyone out and makes every reset link stop working.
+
+`Cors:Origins` (or `Cors__Origins`) lists the web addresses allowed to call the API, separated by commas, for example `https://app.buildfree.org`. `RateLimits:AuthPerMinute` (or `RateLimits__AuthPerMinute`) changes the per-network limit on login and password tries (60 by default).
 
 ## Status
 

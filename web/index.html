@@ -96,6 +96,33 @@
   .jobbtn:hover, .jobbtn[aria-current="true"] { background: var(--hover); }
   .jobbtn b { font-weight: 500; }
   .jobbtn .badge { color: var(--muted); }
+  .jobbtn .num, .jobnum { font-family: "Geist Mono", ui-monospace, Consolas, monospace; color: var(--muted); font-weight: 400; }
+  .jobbtn .num { font-size: 12px; margin-right: 6px; }
+  .jobnum { font-size: 13px; margin-bottom: 2px; }
+  .listtools { display: flex; gap: 6px; }
+  .listtools select { padding: 6px 8px; font-size: 13px; min-width: 0; }
+  .listcount { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; margin: 4px 0 -6px 12px; }
+  .people { display: flex; gap: 12px 32px; flex-wrap: wrap; margin-top: 16px; }
+  .people > div { display: grid; gap: 6px; align-content: start; }
+  .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
+  .chips { display: flex; gap: 6px 14px; flex-wrap: wrap; align-items: center; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .chips a { color: var(--muted); text-decoration: none; }
+  .chips a:hover { color: var(--text); text-decoration: underline; }
+  .av { width: 26px; height: 26px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; background: var(--hover); border: 1px solid var(--line-strong); color: var(--text); flex: none; }
+  .panelhead { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .panelhead select { width: auto; padding: 5px 8px; font-size: 13px; }
+  .feed { display: grid; }
+  .act { display: grid; grid-template-columns: 26px 1fr; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .act:first-child { border-top: 0; padding-top: 0; }
+  .act p { margin: 0; overflow-wrap: anywhere; }
+  .act p b { font-weight: 500; }
+  .act .sub { font-size: 13px; margin-top: 2px; }
+  .act .link { font-size: 13px; }
+  .mgrlist { display: grid; gap: 8px; max-height: 188px; overflow: auto; border: 1px solid var(--line-strong); border-radius: 6px; padding: 10px 12px; background: var(--bg); }
+  .mgrlist label { display: flex; gap: 10px; align-items: center; font-weight: 400; font-size: 14px; }
+  .mgrlist input { width: auto; margin: 0; }
+  .home .group:first-child { margin-top: 0; }
   .pane { padding: 32px; max-width: 1100px; }
   .grid2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; align-items: start; margin-top: 24px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; display: grid; gap: 14px; }
@@ -396,6 +423,16 @@
 
   /* ---------- App ---------- */
   let selected = null, logs = [], photos = [], jobQuery = "";
+  // How the job list is filtered and sorted; remembered on this device.
+  const prefs = {
+    get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} }
+  };
+  let jobFilter = prefs.get("bf_job_filter", "open"), jobSort = prefs.get("bf_job_sort", "newest");
+  const jobLabel = (p) => (p.number != null ? "#" + p.number + " " : "") + p.name;
+  const memberName = (id) => (team.members.find(m => m.id === id) || {}).name;
+  const initials = (name) => (name || "?").trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join("");
+  const avatar = (name) => h("span", { class: "av", "aria-hidden": "true", title: name }, initials(name));
   let estimates = [], changeOrders = [], contract = null;
   let estimateOpen = null; // an estimate or change order id, "new", "new-co", or null
   let invoices = [], billing = null, invoiceOpen = null; // invoiceOpen: an invoice id, "new", or null
@@ -429,22 +466,61 @@
       view === "jobs" ? jobsView() : h("main", {}, view === "team" ? teamView() : clientsView()));
   }
 
+  // The job list's filters: open (not complete), the open jobs I manage, all,
+  // or one status. "words" is how the count reads, e.g. "12 open jobs".
+  const JOB_FILTERS = [
+    { id: "open", label: "Open jobs", words: "open" },
+    { id: "mine", label: "My open jobs", words: "open, managed by you" },
+    { id: "all", label: "All jobs", words: "" },
+    ...STATUS.map((s, i) => ({ id: "s" + i, label: s.label, words: s.label.toLowerCase() }))
+  ];
+  const JOB_SORTS = [
+    { id: "newest", label: "Newest", by: (a, b) => b.createdAt.localeCompare(a.createdAt) },
+    { id: "number", label: "Job number", by: (a, b) => (a.number ?? 0) - (b.number ?? 0) },
+    { id: "name", label: "Name", by: (a, b) => a.name.localeCompare(b.name) },
+    { id: "start", label: "Start date", by: (a, b) => (a.startDate || "9999").localeCompare(b.startDate || "9999") }
+  ];
+  function shownJobs() {
+    const q = jobQuery.trim().toLowerCase();
+    const sort = JOB_SORTS.find(s => s.id === jobSort) || JOB_SORTS[0];
+    return projects.filter(p => {
+      if (jobFilter === "open" && p.status === 3) return false;
+      if (jobFilter === "mine" && (p.status === 3 || !me || !(p.managerIds || []).includes(me.id))) return false;
+      if (jobFilter[0] === "s" && p.status !== +jobFilter.slice(1)) return false;
+      if (!q) return true;
+      const client = clients.find(c => c.id === p.clientId);
+      return [p.number, p.name, p.address, client && client.name].filter(v => v != null).join(" ").toLowerCase().includes(q);
+    }).sort(sort.by);
+  }
+
   function jobsView() {
     const listEl = h("div", { class: "jobs" });
+    const countEl = h("p", { class: "listcount", "aria-live": "polite" });
     const fill = () => {
-      const q = jobQuery.toLowerCase();
-      const shown = projects.filter(p => (p.name + " " + (p.address || "")).toLowerCase().includes(q));
+      const shown = shownJobs();
+      const f = JOB_FILTERS.find(x => x.id === jobFilter) || JOB_FILTERS[0];
+      const noun = shown.length === 1 ? "job" : "jobs";
+      countEl.textContent = jobQuery.trim()
+        ? shown.length + " " + noun + " found"
+        : jobFilter === "mine" ? shown.length + " open " + noun + " you manage"
+        : [shown.length, f.words, noun].filter(Boolean).join(" ");
       listEl.replaceChildren(...(shown.length ? shown.map(p => {
         const s = STATUS[p.status] || STATUS[0];
         return h("button", { class: "jobbtn", "aria-current": selected === p.id ? "true" : "false", onclick: () => selectJob(p.id) },
-          h("b", {}, p.name),
+          h("b", {}, p.number != null && h("span", { class: "num" }, "#" + p.number), p.name),
           h("span", { class: "badge", style: "--c:" + s.color }, p.address ? s.label + " · " + p.address : s.label));
-      }) : [h("p", { class: "sub" }, "No jobs found.")]));
+      }) : [h("p", { class: "sub", style: "padding:0 12px" }, projects.length ? "No jobs match." : "No jobs yet.")]));
     };
     fill();
     const side = h("aside", { class: "side" },
       canManage() && h("button", { class: "btn full", onclick: () => projectDialog() }, "New job"),
-      h("input", { placeholder: "Search jobs", "aria-label": "Search jobs", value: jobQuery, oninput: (e) => { jobQuery = e.target.value; fill(); } }),
+      h("input", { type: "search", placeholder: "Search by name, number, address or client", "aria-label": "Search jobs", value: jobQuery, oninput: (e) => { jobQuery = e.target.value; fill(); } }),
+      h("div", { class: "listtools" },
+        h("select", { "aria-label": "Show", onchange: (e) => { jobFilter = e.target.value; prefs.set("bf_job_filter", jobFilter); fill(); } },
+          JOB_FILTERS.map(f => h("option", { value: f.id, selected: f.id === jobFilter ? "" : false }, f.label))),
+        h("select", { "aria-label": "Sort by", onchange: (e) => { jobSort = e.target.value; prefs.set("bf_job_sort", jobSort); fill(); } },
+          JOB_SORTS.map(s => h("option", { value: s.id, selected: s.id === jobSort ? "" : false }, "Sort: " + s.label)))),
+      countEl,
       listEl);
     const p = projects.find(x => x.id === selected);
     return h("div", { class: "layout" }, side, h("div", { class: "pane" }, p ? (!canManage() ? jobDetail(p) : estimateOpen ? estimateEditor(p) : invoiceOpen ? invoiceEditor(p) : jobDetail(p)) : home()));
@@ -473,9 +549,62 @@
     return h("div", {},
       h("div", { class: "head" }, h("h1", {}, "Today")),
       h("p", { class: "sub" }, projects.length ? "Pick a job on the left, or work through your to-dos below." : canManage() ? "Create your first job to get started." : "No jobs yet. The office adds jobs, and they show up here."),
-      group("Past due", open.filter(t => t.dueDate && t.dueDate < t0), "late"),
-      group("Due today", open.filter(t => t.dueDate === t0)),
-      group("Upcoming and no date", open.filter(t => !t.dueDate || t.dueDate > t0)));
+      h("div", { class: "grid2 home" },
+        h("div", {},
+          group("Past due", open.filter(t => t.dueDate && t.dueDate < t0), "late"),
+          group("Due today", open.filter(t => t.dueDate === t0)),
+          group("Upcoming and no date", open.filter(t => !t.dueDate || t.dueDate > t0))),
+        activityPanel({ title: "Recent activity from your team", limit: 15 })));
+  }
+
+  /* ---------- Recent activity ---------- */
+  // A panel that loads its own lines: the whole company's (with a filter by
+  // person) on the Today page, or one job's on the job page.
+  function activityPanel({ title, projectId, limit }) {
+    let who = "", items = [];
+    const list = h("div", { class: "feed" }, h("p", { class: "sub" }, "Loading…"));
+    const more = h("button", { class: "btn ghost", type: "button", style: "display:none;justify-self:start", onclick: () => load(true) }, "Show more");
+    const filter = !projectId && team.members.length > 1 && h("select", { "aria-label": "Show activity from",
+      onchange: (e) => { who = e.target.value; load(false); } },
+      h("option", { value: "" }, "Everyone"), team.members.map(m => h("option", { value: m.id }, m.name)));
+    async function load(older) {
+      const q = new URLSearchParams({ limit });
+      if (projectId) q.set("projectId", projectId);
+      if (who) q.set("userId", who);
+      if (older && items.length) q.set("before", items[items.length - 1].createdAt);
+      more.disabled = true;
+      let got;
+      try { got = await api("/api/activity?" + q); }
+      catch (ex) { list.replaceChildren(h("p", { class: "err" }, ex.message)); return; }
+      finally { more.disabled = false; }
+      items = older ? items.concat(got) : got;
+      more.style.display = got.length === limit ? "" : "none";
+      list.replaceChildren(...(items.length ? items.map(a => activityRow(a, !projectId)) : [h("p", { class: "sub" }, "Nothing yet. Changes your team makes show up here.")]));
+    }
+    load(false);
+    return h("div", { class: "panel" }, h("div", { class: "panelhead" }, h("h2", {}, title), filter), list, more);
+  }
+
+  function activityRow(a, showJob) {
+    const job = a.projectId && projects.find(p => p.id === a.projectId);
+    const jobText = job ? jobLabel(job) : a.jobName;
+    return h("div", { class: "act" }, avatar(a.userName),
+      h("div", {},
+        h("p", {}, h("b", {}, a.userName), " " + a.text),
+        h("p", { class: "sub" },
+          showJob && jobText ? [job ? h("button", { class: "link", type: "button", onclick: () => selectJob(job.id) }, jobText) : jobText, " · "] : null,
+          h("time", { datetime: a.createdAt, title: new Date(a.createdAt).toLocaleString() }, timeAgo(a.createdAt)))));
+  }
+
+  function timeAgo(iso) {
+    const t = new Date(iso), secs = (Date.now() - t) / 1000, now = new Date();
+    if (secs < 60) return "Just now";
+    if (secs < 3600) return Math.floor(secs / 60) + " min ago";
+    const time = t.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+    if (t.toDateString() === now.toDateString()) return "Today, " + time;
+    if (t.toDateString() === yesterday.toDateString()) return "Yesterday, " + time;
+    return t.toLocaleDateString(undefined, { month: "short", day: "numeric", year: t.getFullYear() === now.getFullYear() ? undefined : "numeric" }) + ", " + time;
   }
 
   /* ---------- Photos ---------- */
@@ -656,12 +785,23 @@
       h("input", { name: "dueDate", type: "date", "aria-label": "Due date" }),
       h("button", { class: "btn", type: "submit" }, "Add"));
 
+    const managers = (p.managerIds || []).map(memberName).filter(Boolean);
     return h("div", {},
-      h("div", { class: "head" }, h("h1", {}, p.name),
+      h("div", { class: "head" },
+        h("div", {}, p.number != null && h("div", { class: "jobnum" }, "Job #" + p.number), h("h1", {}, p.name)),
         h("div", { class: "headtools" }, status,
           canManage() && h("button", { class: "btn ghost", onclick: () => projectDialog(p) }, "Edit job"),
           canManage() && h("button", { class: "btn ghost", onclick: () => confirmDelete("Delete “" + p.name + "”? Its daily logs, photos and to-dos are deleted too. This can’t be undone.", "/api/projects/" + p.id, () => { selected = null; }) }, "Delete"))),
-      h("p", { class: "sub" }, [p.address, client && "Client: " + client.name, p.startDate && "Start " + fmtDate(p.startDate), p.endDate && "End " + fmtDate(p.endDate)].filter(Boolean).join(" · ") || "No address or client yet"),
+      h("p", { class: "sub" }, [p.address, p.startDate && "Start " + fmtDate(p.startDate), p.endDate && "End " + fmtDate(p.endDate)].filter(Boolean).join(" · ") || "No address or dates yet"),
+      h("div", { class: "people" },
+        h("div", {}, h("span", { class: "label" }, "Client"),
+          client ? h("div", { class: "chips" }, h("span", { class: "chip" }, avatar(client.name), client.name),
+            client.phone && h("a", { href: "tel:" + client.phone, class: "mono" }, client.phone),
+            client.email && h("a", { href: "mailto:" + client.email, class: "mono" }, client.email))
+          : h("span", { class: "sub" }, "No client yet")),
+        h("div", {}, h("span", { class: "label" }, "Project managers"),
+          managers.length ? h("div", { class: "chips" }, managers.map(n => h("span", { class: "chip" }, avatar(n), n)))
+          : h("span", { class: "sub" }, canManage() ? h("button", { class: "link", type: "button", onclick: () => projectDialog(p) }, "Add a project manager") : "None yet"))),
       h("div", { class: "grid2" },
         h("div", { class: "panel" }, h("h2", {}, "Daily logs"), logForm,
           logs.length ? logs.map(l => h("div", { class: "entry" },
@@ -680,7 +820,8 @@
           h("div", { class: "panel" }, h("h2", {}, "To-dos"), todoForm, todoErr,
             mine.length ? mine.map(t => todoRow(t)) : h("p", { class: "sub" }, "No to-dos yet.")),
           h("div", { class: "panel" }, h("h2", {}, "Photos (" + photos.length + ")"),
-            photos.length ? gallery.flat() : h("p", { class: "sub" }, "Photos you add to daily logs show up here.")))));
+            photos.length ? gallery.flat() : h("p", { class: "sub" }, "Photos you add to daily logs show up here.")),
+          activityPanel({ title: "Recent activity", projectId: p.id, limit: 8 }))));
   }
 
   function clientsView() {
@@ -839,17 +980,28 @@
   // Pass an existing job to edit it; pass nothing to create a new one.
   function projectDialog(p) {
     const editing = p && p.id ? p : null, v = editing || {};
+    const next = Math.max(1000, ...projects.map(x => x.number || 0)) + 1;
+    const mgrs = v.managerIds || [];
+    const mgrBox = h("div", { class: "mgrlist" }, team.members.map(m =>
+      h("label", {}, h("input", { type: "checkbox", value: m.id, checked: mgrs.includes(m.id) ? "" : false }), avatar(m.name), m.name,
+        m.id === me.id ? h("span", { class: "you" }, " (you)") : null)));
     dialog(editing ? "Edit job" : "New job", [
-      h("label", {}, "Job name", h("input", { name: "name", required: true, maxlength: 200, placeholder: "Kitchen remodel", value: v.name || "" })),
+      h("div", { class: "inline" },
+        h("label", { style: "flex:3" }, "Job name", h("input", { name: "name", required: true, maxlength: 200, placeholder: "Kitchen remodel", value: v.name || "" })),
+        h("label", { style: "flex:1;min-width:110px" }, "Job number", h("input", { name: "number", type: "number", min: 1, max: 9999999, step: 1,
+          required: editing ? true : false, placeholder: String(next), value: v.number != null ? v.number : "", class: "mono" }))),
       h("label", {}, "Address", h("input", { name: "address", maxlength: 300, placeholder: "123 Main St", value: v.address || "" })),
       h("label", {}, "Client", h("select", { name: "clientId" },
         h("option", { value: "" }, "No client yet"),
         clients.map(c => h("option", { value: c.id, selected: v.clientId === c.id ? "" : false }, c.name)))),
       h("div", { class: "inline" },
         h("label", { style: "flex:1" }, "Start date", h("input", { name: "startDate", type: "date", value: v.startDate || "" })),
-        h("label", { style: "flex:1" }, "End date", h("input", { name: "endDate", type: "date", value: v.endDate || "" })))
+        h("label", { style: "flex:1" }, "End date", h("input", { name: "endDate", type: "date", value: v.endDate || "" }))),
+      h("div", { style: "display:grid;gap:6px" }, h("span", { class: "label" }, "Project managers"), mgrBox),
+      !editing && h("p", { class: "sub", style: "margin:0;font-size:13px" }, "Leave the job number blank to use " + next + ".")
     ], editing ? "Save changes" : "Create job", async (f) => {
-      const body = { name: f.name, address: f.address || null, clientId: f.clientId || null, startDate: f.startDate || null, endDate: f.endDate || null };
+      const body = { name: f.name, address: f.address || null, clientId: f.clientId || null, startDate: f.startDate || null, endDate: f.endDate || null,
+        number: f.number ? +f.number : null, managerIds: [...mgrBox.querySelectorAll("input:checked")].map(i => i.value) };
       if (editing) return api("/api/projects/" + editing.id, "PUT", body);
       const created = await api("/api/projects", "POST", body);
       selected = created.id;

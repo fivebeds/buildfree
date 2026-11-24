@@ -65,6 +65,14 @@ public class Project
     public DateOnly? StartDate { get; set; }
     public DateOnly? EndDate { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    // The job number people use to talk about the job ("job 1042"). Numbered
+    // per company, starting at 1001; the office can change it, for example to
+    // keep numbers from another system. Every job gets one (see JobNumbers).
+    public int? Number { get; set; }
+
+    // The team members who run this job.
+    public List<Guid> ManagerIds { get; set; } = new();
 }
 
 public class DailyLog
@@ -191,12 +199,33 @@ public class Payment
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
+// One line in the recent activity feed: who did what, on which job, and when.
+// The job's name is kept too, so the line still reads right after the job is
+// deleted. OfficeOnly lines (estimates, invoices, payments) are hidden from
+// field crew, who can't see those.
+public class Activity
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccountId { get; set; }
+    public Guid? ProjectId { get; set; }
+    public string? JobName { get; set; }
+    public Guid? UserId { get; set; }
+    public string UserName { get; set; } = "";
+    public string Kind { get; set; } = "";
+    public string Text { get; set; } = "";
+    public bool OfficeOnly { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 // Request shapes (what the API accepts). Strings can arrive as null when a
 // field is left out of the JSON, so the endpoints check them before use.
 public record SignupRequest(string? CompanyName, string? Name, string? Email, string? Password);
 public record LoginRequest(string? Email, string? Password);
 public record ClientRequest(string? Name, string? Email, string? Phone);
-public record ProjectRequest(string? Name, string? Address, Guid? ClientId, DateOnly? StartDate, DateOnly? EndDate = null);
+// Number and ManagerIds left out (null) keep what the job already has; a new
+// job left without a number gets the next one.
+public record ProjectRequest(string? Name, string? Address, Guid? ClientId, DateOnly? StartDate, DateOnly? EndDate = null,
+    int? Number = null, List<Guid>? ManagerIds = null);
 public record StatusRequest(int Status);
 public record LogRequest(string? Notes, int? CrewCount, DateOnly? Date);
 public record TodoRequest(string? Title, DateOnly? DueDate);

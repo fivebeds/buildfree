@@ -160,6 +160,7 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     if (db.Database.GetMigrations().Any()) db.Database.Migrate();
     else db.Database.EnsureCreated();
+    await JobNumbers.Backfill(db);
 }
 
 // Online, browsers are told to always use https for this site.
@@ -341,8 +342,32 @@ static IResult? CheckProject(ProjectRequest r)
     if (TooLong(Clean(r.Address), 300)) return Bad("Address is too long.");
     if (r.StartDate is DateOnly s && r.EndDate is DateOnly e && e < s)
         return Bad("End date can't be before the start date.");
+    if (r.Number is < 1 or > JobNumbers.Max) return Bad("Job number must be between 1 and 9,999,999.");
+    if (r.ManagerIds is { Count: > 20 }) return Bad("A job can have up to 20 project managers.");
     return null;
 }
+
+// The client and project managers on a job must belong to the same company,
+// and the job number can't already be in use there.
+static async Task<IResult?> CheckJobLinks(AppDbContext db, Guid accountId, ProjectRequest r, Guid? jobId)
+{
+    if (r.ClientId is Guid cid && !await db.Clients.AnyAsync(c => c.Id == cid && c.AccountId == accountId))
+        return Bad("Client not found.");
+    if (r.ManagerIds is { Count: > 0 } ids)
+    {
+        var wanted = ids.Distinct().ToList();
+        if (await db.Users.CountAsync(u => u.AccountId == accountId && wanted.Contains(u.Id)) != wanted.Count)
+            return Bad("A project manager wasn't found on your team.");
+    }
+    if (r.Number is int n)
+    {
+        var other = await db.Projects.FirstOrDefaultAsync(p => p.AccountId == accountId && p.Number == n && p.Id != jobId);
+        if (other is not null) return Results.Conflict(new { error = $"Job number {n} is already used by “{other.Name}”." });
+    }
+    return null;
+}
+
+static string StatusName(ProjectStatus s) => s == ProjectStatus.OnHold ? "On hold" : s.ToString();
 
 // ---------- Health ----------
 
@@ -410,7 +435,7 @@ clients.MapGet("/", async (ClaimsPrincipal me, AppDbContext db) =>
         .OrderBy(c => c.Name).ToListAsync();
 });
 
-clients.MapPost("/", async (ClientRequest r, ClaimsPrincipal me, AppDbContext db) =>
+clients.MapPost("/", async (ClientRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     if (CheckClient(r) is IResult bad) return bad;
     var client = new Client
@@ -421,11 +446,12 @@ clients.MapPost("/", async (ClientRequest r, ClaimsPrincipal me, AppDbContext db
         Phone = Clean(r.Phone)
     };
     db.Clients.Add(client);
+    Feed.Add(db, Me(ctx), "client", "added client " + client.Name);
     await db.SaveChangesAsync();
     return Results.Created($"/api/clients/{client.Id}", client);
 }).AddEndpointFilter(OfficeOnly);
 
-clients.MapPut("/{id:guid}", async (Guid id, ClientRequest r, ClaimsPrincipal me, AppDbContext db) =>
+clients.MapPut("/{id:guid}", async (Guid id, ClientRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var client = await db.Clients.FirstOrDefaultAsync(c => c.Id == id && c.AccountId == accountId);
@@ -434,12 +460,13 @@ clients.MapPut("/{id:guid}", async (Guid id, ClientRequest r, ClaimsPrincipal me
     client.Name = Clean(r.Name)!;
     client.Email = Clean(r.Email);
     client.Phone = Clean(r.Phone);
+    Feed.Add(db, Me(ctx), "client", "updated client " + client.Name);
     await db.SaveChangesAsync();
     return Results.Ok(client);
 }).AddEndpointFilter(OfficeOnly);
 
 // Deleting a client keeps their jobs; the jobs just lose the client link.
-clients.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+clients.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var client = await db.Clients.FirstOrDefaultAsync(c => c.Id == id && c.AccountId == accountId);
@@ -447,6 +474,7 @@ clients.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext
     var jobs = await db.Projects.Where(p => p.ClientId == id && p.AccountId == accountId).ToListAsync();
     foreach (var job in jobs) job.ClientId = null;
     db.Clients.Remove(client);
+    Feed.Add(db, Me(ctx), "client", "deleted client " + client.Name);
     await db.SaveChangesAsync();
     return Results.NoContent();
 }).AddEndpointFilter(OfficeOnly);
@@ -469,15 +497,11 @@ projects.MapGet("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext d
     return project is null ? Results.NotFound() : Results.Ok(project);
 });
 
-projects.MapPost("/", async (ProjectRequest r, ClaimsPrincipal me, AppDbContext db) =>
+projects.MapPost("/", async (ProjectRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     if (CheckProject(r) is IResult bad) return bad;
-
-    // Make sure the client belongs to this same company.
-    if (r.ClientId is Guid cid &&
-        !await db.Clients.AnyAsync(c => c.Id == cid && c.AccountId == accountId))
-        return Bad("Client not found.");
+    if (await CheckJobLinks(db, accountId, r, null) is IResult badLink) return badLink;
 
     var project = new Project
     {
@@ -486,28 +510,38 @@ projects.MapPost("/", async (ProjectRequest r, ClaimsPrincipal me, AppDbContext 
         Name = Clean(r.Name)!,
         Address = Clean(r.Address),
         StartDate = r.StartDate,
-        EndDate = r.EndDate
+        EndDate = r.EndDate,
+        Number = r.Number,
+        ManagerIds = r.ManagerIds?.Distinct().ToList() ?? new()
     };
     db.Projects.Add(project);
-    await db.SaveChangesAsync();
+    var line = Feed.Add(db, Me(ctx), "job", "created the job", project);
+    if (r.Number is not null) await db.SaveChangesAsync();
+    else await Saving.SaveNumbered(db, () => JobNumbers.Next(db, accountId), n =>
+    {
+        project.Number = n;
+        line.JobName = JobNumbers.Label(project);
+    });
     return Results.Created($"/api/projects/{project.Id}", project);
 }).AddEndpointFilter(OfficeOnly);
 
-projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal me, AppDbContext db) =>
+projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var project = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
     if (project is null) return Results.NotFound();
     if (CheckProject(r) is IResult bad) return bad;
-    if (r.ClientId is Guid cid &&
-        !await db.Clients.AnyAsync(c => c.Id == cid && c.AccountId == accountId))
-        return Bad("Client not found.");
+    if (await CheckJobLinks(db, accountId, r, id) is IResult badLink) return badLink;
 
+    var oldNumber = project.Number;
     project.Name = Clean(r.Name)!;
     project.Address = Clean(r.Address);
     project.ClientId = r.ClientId;
     project.StartDate = r.StartDate;
     project.EndDate = r.EndDate;
+    if (r.Number is int n) project.Number = n;
+    if (r.ManagerIds is not null) project.ManagerIds = r.ManagerIds.Distinct().ToList();
+    Feed.Add(db, Me(ctx), "job", project.Number != oldNumber ? $"changed the job number from {oldNumber} to {project.Number}" : "updated the job details", project);
     await db.SaveChangesAsync();
     return Results.Ok(project);
 }).AddEndpointFilter(OfficeOnly);
@@ -516,7 +550,7 @@ projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal 
 // its draft estimates and invoices. A job with an approved estimate or change
 // order, or an invoice that went out, holds real money records, so it can't
 // be deleted; mark it Complete instead.
-projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
+projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
 {
     var accountId = AccountId(me);
     var project = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
@@ -529,6 +563,7 @@ projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContex
     db.Logs.RemoveRange(await db.Logs.Where(l => l.ProjectId == id && l.AccountId == accountId).ToListAsync());
     db.Todos.RemoveRange(await db.Todos.Where(t => t.ProjectId == id && t.AccountId == accountId).ToListAsync());
     db.Projects.Remove(project);
+    Feed.Add(db, Me(ctx), "job", "deleted the job", project);
     await db.SaveChangesAsync();
     await DeletePhotoFiles(photos, store, logger);
     return Results.NoContent();
@@ -536,13 +571,14 @@ projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContex
 
 // ---------- Job status, daily logs, to-dos ----------
 
-projects.MapPut("/{id:guid}/status", async (Guid id, StatusRequest r, ClaimsPrincipal me, AppDbContext db) =>
+projects.MapPut("/{id:guid}/status", async (Guid id, StatusRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var project = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
     if (project is null) return Results.NotFound();
     if (!Enum.IsDefined(typeof(ProjectStatus), r.Status)) return Bad("Unknown status.");
     project.Status = (ProjectStatus)r.Status;
+    Feed.Add(db, Me(ctx), "job", "changed the status to " + StatusName(project.Status), project);
     await db.SaveChangesAsync();
     return Results.Ok(project);
 }).AddEndpointFilter(OfficeOnly);
@@ -566,8 +602,8 @@ static IResult? CheckLog(LogRequest r)
 projects.MapPost("/{id:guid}/logs", async (Guid id, LogRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
-    if (!await db.Projects.AnyAsync(p => p.Id == id && p.AccountId == accountId))
-        return Results.NotFound();
+    var job = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
+    if (job is null) return Results.NotFound();
     if (CheckLog(r) is IResult bad) return bad;
     var log = new DailyLog
     {
@@ -580,6 +616,7 @@ projects.MapPost("/{id:guid}/logs", async (Guid id, LogRequest r, ClaimsPrincipa
         CrewCount = r.CrewCount
     };
     db.Logs.Add(log);
+    Feed.Add(db, Me(ctx), "log", "added a daily log for " + Feed.Day(log.Date), job);
     await db.SaveChangesAsync();
     return Results.Created($"/api/logs/{log.Id}", log);
 });
@@ -596,6 +633,7 @@ logs.MapPut("/{id:guid}", async (Guid id, LogRequest r, ClaimsPrincipal me, Http
     log.Notes = Clean(r.Notes)!;
     log.CrewCount = r.CrewCount;
     if (r.Date is DateOnly d) log.Date = d;
+    await Feed.Add(db, Me(ctx), "log", "edited the daily log for " + Feed.Day(log.Date), log.ProjectId);
     await db.SaveChangesAsync();
     return Results.Ok(log);
 });
@@ -610,6 +648,7 @@ logs.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx
     var photos = await db.Photos.Where(p => p.LogId == id && p.AccountId == accountId).ToListAsync();
     db.Photos.RemoveRange(photos);
     db.Logs.Remove(log);
+    await Feed.Add(db, Me(ctx), "log", "deleted the daily log for " + Feed.Day(log.Date), log.ProjectId);
     await db.SaveChangesAsync();
     await DeletePhotoFiles(photos, store, logger);
     return Results.NoContent();
@@ -694,6 +733,7 @@ logs.MapPost("/{id:guid}/photos", async (Guid id, HttpRequest req, ClaimsPrincip
             saved.Add(photo);
         }
         db.Photos.AddRange(saved);
+        await Feed.Add(db, Me(ctx), "photo", $"added {saved.Count} photo{(saved.Count == 1 ? "" : "s")} to the daily log for {Feed.Day(log.Date)}", log.ProjectId);
         await db.SaveChangesAsync();
     }
     catch
@@ -729,6 +769,7 @@ photoRoutes.MapPut("/{id:guid}", async (Guid id, PhotoRequest r, ClaimsPrincipal
     var caption = Clean(r.Caption);
     if (TooLong(caption, 500)) return Bad("Caption is too long.");
     photo.Caption = caption;
+    await Feed.Add(db, Me(ctx), "photo", caption is null ? "removed a photo caption" : "captioned a photo · " + caption, photo.ProjectId);
     await db.SaveChangesAsync();
     return Results.Ok(photo);
 });
@@ -740,6 +781,7 @@ photoRoutes.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpCont
     if (photo is null) return Results.NotFound();
     if (!CanChange(Me(ctx), photo.UploadedById)) return Forbidden("Field crew can only delete their own photos.");
     db.Photos.Remove(photo);
+    await Feed.Add(db, Me(ctx), "photo", "deleted a photo", photo.ProjectId);
     await db.SaveChangesAsync();
     await DeletePhotoFiles(new[] { photo }, store, logger);
     return Results.NoContent();
@@ -753,14 +795,15 @@ static IResult? CheckTodo(TodoRequest r)
     return null;
 }
 
-projects.MapPost("/{id:guid}/todos", async (Guid id, TodoRequest r, ClaimsPrincipal me, AppDbContext db) =>
+projects.MapPost("/{id:guid}/todos", async (Guid id, TodoRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
-    if (!await db.Projects.AnyAsync(p => p.Id == id && p.AccountId == accountId))
-        return Results.NotFound();
+    var job = await db.Projects.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
+    if (job is null) return Results.NotFound();
     if (CheckTodo(r) is IResult bad) return bad;
     var todo = new TodoItem { AccountId = accountId, ProjectId = id, Title = Clean(r.Title)!, DueDate = r.DueDate };
     db.Todos.Add(todo);
+    Feed.Add(db, Me(ctx), "todo", "added a to-do · " + todo.Title, job);
     await db.SaveChangesAsync();
     return Results.Created($"/api/todos/{todo.Id}", todo);
 });
@@ -774,7 +817,7 @@ todos.MapGet("/", async (ClaimsPrincipal me, AppDbContext db) =>
         .OrderBy(t => t.Done).ThenBy(t => t.DueDate).ToListAsync();
 });
 
-todos.MapPut("/{id:guid}", async (Guid id, TodoRequest r, ClaimsPrincipal me, AppDbContext db) =>
+todos.MapPut("/{id:guid}", async (Guid id, TodoRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var todo = await db.Todos.FirstOrDefaultAsync(t => t.Id == id && t.AccountId == accountId);
@@ -782,26 +825,29 @@ todos.MapPut("/{id:guid}", async (Guid id, TodoRequest r, ClaimsPrincipal me, Ap
     if (CheckTodo(r) is IResult bad) return bad;
     todo.Title = Clean(r.Title)!;
     todo.DueDate = r.DueDate;
+    await Feed.Add(db, Me(ctx), "todo", "edited a to-do · " + todo.Title, todo.ProjectId);
     await db.SaveChangesAsync();
     return Results.Ok(todo);
 });
 
-todos.MapPost("/{id:guid}/toggle", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+todos.MapPost("/{id:guid}/toggle", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var todo = await db.Todos.FirstOrDefaultAsync(t => t.Id == id && t.AccountId == accountId);
     if (todo is null) return Results.NotFound();
     todo.Done = !todo.Done;
+    await Feed.Add(db, Me(ctx), "todo", (todo.Done ? "checked off a to-do · " : "reopened a to-do · ") + todo.Title, todo.ProjectId);
     await db.SaveChangesAsync();
     return Results.Ok(todo);
 });
 
-todos.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+todos.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var todo = await db.Todos.FirstOrDefaultAsync(t => t.Id == id && t.AccountId == accountId);
     if (todo is null) return Results.NotFound();
     db.Todos.Remove(todo);
+    await Feed.Add(db, Me(ctx), "todo", "deleted a to-do · " + todo.Title, todo.ProjectId);
     await db.SaveChangesAsync();
     return Results.NoContent();
 });
@@ -855,21 +901,23 @@ team.MapPost("/invites", async (InviteRequest r, ClaimsPrincipal me, HttpContext
         InvitedBy = Me(ctx).Name
     };
     db.Invites.Add(invite);
+    Feed.Add(db, Me(ctx), "team", $"invited {invite.Name} to join as {invite.Role}");
     await db.SaveChangesAsync();
     return Results.Created($"/api/team/invites/{invite.Id}", new { invite, code });
 }).AddEndpointFilter(OwnerOnly);
 
-team.MapDelete("/invites/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+team.MapDelete("/invites/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var invite = await db.Invites.FirstOrDefaultAsync(i => i.Id == id && i.AccountId == accountId);
     if (invite is null) return Results.NotFound();
     db.Invites.Remove(invite);
+    Feed.Add(db, Me(ctx), "team", "canceled the invite for " + invite.Name);
     await db.SaveChangesAsync();
     return Results.NoContent();
 }).AddEndpointFilter(OwnerOnly);
 
-team.MapPut("/{id:guid}/role", async (Guid id, RoleRequest r, ClaimsPrincipal me, AppDbContext db) =>
+team.MapPut("/{id:guid}/role", async (Guid id, RoleRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
     var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id && u.AccountId == accountId);
@@ -879,6 +927,7 @@ team.MapPut("/{id:guid}/role", async (Guid id, RoleRequest r, ClaimsPrincipal me
     if (user.Role == UserRole.Owner && role != UserRole.Owner &&
         await db.Users.CountAsync(u => u.AccountId == accountId && u.Role == UserRole.Owner) == 1)
         return Bad("The company needs at least one owner.");
+    if (user.Role != role) Feed.Add(db, Me(ctx), "team", $"changed {user.Name}'s role to {role}");
     user.Role = role;
     await db.SaveChangesAsync();
     return Results.Ok(MemberView(user));
@@ -905,6 +954,10 @@ team.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx
     var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id && u.AccountId == accountId);
     if (user is null) return Results.NotFound();
     db.Users.Remove(user);
+    // They no longer manage any jobs.
+    var managed = await db.Projects.Where(p => p.AccountId == accountId && p.ManagerIds.Contains(id)).ToListAsync();
+    foreach (var job in managed) job.ManagerIds = job.ManagerIds.Where(m => m != id).ToList();
+    Feed.Add(db, Me(ctx), "team", $"removed {user.Name} from the team");
     await db.SaveChangesAsync();
     return Results.NoContent();
 }).AddEndpointFilter(OwnerOnly);
@@ -942,6 +995,7 @@ app.MapPost("/api/auth/accept-invite", async (AcceptInviteRequest r, AppDbContex
     };
     db.Users.Add(user);
     db.Invites.Remove(invite);
+    Feed.Add(db, user, "team", "joined the team");
     await db.SaveChangesAsync();
     return Results.Ok(new { token = MakeToken(user) });
 }).RequireRateLimiting("auth");
@@ -990,5 +1044,6 @@ app.MapPost("/api/auth/reset-password", async (PasswordResetRequest r, AppDbCont
 
 app.MapEstimates();
 app.MapInvoices();
+app.MapActivity();
 
 app.Run();

@@ -36,7 +36,7 @@ public static class Invoices
             return Results.Ok(list.Select(i => View(i, lines.Where(l => l.InvoiceId == i.Id), paid.Where(p => p.InvoiceId == i.Id))));
         });
 
-        jobs.MapPost("/{id:guid}/invoices", async (Guid id, InvoiceRequest r, ClaimsPrincipal me, AppDbContext db) =>
+        jobs.MapPost("/{id:guid}/invoices", async (Guid id, InvoiceRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var accountId = AccountId(me);
             if (!await db.Projects.AnyAsync(p => p.Id == id && p.AccountId == accountId)) return Results.NotFound();
@@ -46,9 +46,14 @@ public static class Invoices
             var lines = MakeLines(invoice, r.Lines!);
             db.Invoices.Add(invoice);
             db.InvoiceLines.AddRange(lines);
+            var line = await Note(db, ctx, invoice, "");
             await Saving.SaveNumbered(db,
                 async () => (await db.Invoices.Where(i => i.AccountId == accountId).MaxAsync(i => (int?)i.Number) ?? 0) + 1,
-                n => invoice.Number = n);
+                n =>
+                {
+                    invoice.Number = n;
+                    line.Text = "created " + Label(invoice);
+                });
             return Results.Created($"/api/invoices/{invoice.Id}", View(invoice, lines, Array.Empty<Payment>()));
         });
 
@@ -88,7 +93,7 @@ public static class Invoices
         });
 
         // Saves the whole invoice: details plus the full list of lines.
-        invoices.MapPut("/{id:guid}", async (Guid id, InvoiceRequest r, ClaimsPrincipal me, AppDbContext db) =>
+        invoices.MapPut("/{id:guid}", async (Guid id, InvoiceRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var (invoice, oldLines, paid) = await Load(db, id, AccountId(me));
             if (invoice is null) return Results.NotFound();
@@ -100,11 +105,12 @@ public static class Invoices
             db.InvoiceLines.RemoveRange(oldLines);
             var lines = MakeLines(invoice, r.Lines!);
             db.InvoiceLines.AddRange(lines);
+            await Note(db, ctx, invoice, "updated " + Label(invoice));
             await db.SaveChangesAsync();
             return Results.Ok(View(invoice, lines, paid));
         });
 
-        invoices.MapPut("/{id:guid}/status", async (Guid id, StatusRequest r, ClaimsPrincipal me, AppDbContext db) =>
+        invoices.MapPut("/{id:guid}/status", async (Guid id, StatusRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var (invoice, lines, paid) = await Load(db, id, AccountId(me));
             if (invoice is null) return Results.NotFound();
@@ -112,13 +118,15 @@ public static class Invoices
             var status = (InvoiceStatus)r.Status;
             if (status != InvoiceStatus.Sent && paid.Count > 0)
                 return Results.Conflict(new { error = "This invoice has payments, so it has to stay sent. Delete the payments first if they were a mistake." });
+            if (invoice.Status != status)
+                await Note(db, ctx, invoice, $"marked invoice #{invoice.Number} {status.ToString().ToLowerInvariant()}");
             invoice.Status = status;
             invoice.UpdatedAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
             return Results.Ok(View(invoice, lines, paid));
         });
 
-        invoices.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+        invoices.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var (invoice, lines, paid) = await Load(db, id, AccountId(me));
             if (invoice is null) return Results.NotFound();
@@ -126,6 +134,7 @@ public static class Invoices
             if (invoice.Status == InvoiceStatus.Sent) return Results.Conflict(new { error = "This invoice was sent, so it can't be deleted. Void it instead, so there's a record of it." });
             db.InvoiceLines.RemoveRange(lines);
             db.Invoices.Remove(invoice);
+            await Note(db, ctx, invoice, "deleted " + Label(invoice));
             await db.SaveChangesAsync();
             return Results.NoContent();
         });
@@ -155,6 +164,7 @@ public static class Invoices
                 RecordedBy = (ctx.Items["me"] as User)?.Name ?? ""
             };
             db.Payments.Add(payment);
+            await Note(db, ctx, invoice, $"recorded a {Feed.Money(amount)} payment on invoice #{invoice.Number}", "payment");
             if (invoice.Status == InvoiceStatus.Draft) invoice.Status = InvoiceStatus.Sent;
             invoice.UpdatedAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
@@ -162,12 +172,14 @@ public static class Invoices
             return Results.Created($"/api/payments/{payment.Id}", View(invoice, lines, paid));
         });
 
-        payments.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+        payments.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var accountId = AccountId(me);
             var payment = await db.Payments.FirstOrDefaultAsync(p => p.Id == id && p.AccountId == accountId);
             if (payment is null) return Results.NotFound();
             db.Payments.Remove(payment);
+            var invoice = await db.Invoices.FirstAsync(i => i.Id == payment.InvoiceId);
+            await Note(db, ctx, invoice, $"deleted a {Feed.Money(payment.Amount)} payment on invoice #{invoice.Number}", "payment");
             await db.SaveChangesAsync();
             return Results.NoContent();
         });
@@ -213,6 +225,12 @@ public static class Invoices
     }
 
     // ---------- Helpers ----------
+
+    static string Label(Invoice i) => $"invoice #{i.Number} · {i.Title}";
+
+    // Adds a line to the recent activity feed. Field crew don't see these.
+    static Task<Activity> Note(AppDbContext db, HttpContext ctx, Invoice i, string text, string kind = "invoice") =>
+        Feed.Add(db, (User)ctx.Items["me"]!, kind, text, i.ProjectId, officeOnly: true);
 
     static async Task<(Invoice?, List<InvoiceLine>, List<Payment>)> Load(AppDbContext db, Guid id, Guid accountId)
     {

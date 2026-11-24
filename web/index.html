@@ -303,7 +303,8 @@
       err,
       h("button", { class: "btn", type: "submit" }, signup ? "Create account" : "Log in"),
       h("button", { class: "link", type: "button", onclick: () => mount(authView(signup ? "login" : "signup")) },
-        signup ? "Already have an account? Log in" : "New here? Create an account")
+        signup ? "Already have an account? Log in" : "New here? Create an account"),
+      !signup && h("p", { class: "sub", style: "margin:0;text-align:center" }, "Forgot your password? Ask your company’s owner for a reset link from the Team page.")
     );
     return h("div", { class: "auth" }, form);
   }
@@ -314,19 +315,21 @@
 
   /* ---------- Joining a team from an invite link ---------- */
   const joinCode = () => (location.hash.match(/^#join=([0-9a-f]+)$/i) || [])[1];
+  const resetCode = () => (location.hash.match(/^#reset=([A-Za-z0-9_-]+)$/) || [])[1];
   function leaveJoin() { history.replaceState(null, "", location.pathname + location.search); }
+  function brokenLinkView(message) {
+    return h("div", { class: "auth" }, h("div", { class: "card" },
+      h("div", { class: "logo" }, h("i"), "BuildFree"),
+      h("h1", {}, "This link doesn’t work"),
+      h("p", { class: "sub", style: "margin:0" }, message),
+      h("button", { class: "btn", type: "button", onclick: () => { leaveJoin(); token = store.get(); start(); } }, "Go to log in")));
+  }
 
   async function joinView(code) {
     token = null; // the link is for the person being invited, not whoever was logged in here
     let invite;
     try { invite = await api("/api/invites/" + code); }
-    catch (ex) {
-      return h("div", { class: "auth" }, h("div", { class: "card" },
-        h("div", { class: "logo" }, h("i"), "BuildFree"),
-        h("h1", {}, "This link doesn’t work"),
-        h("p", { class: "sub", style: "margin:0" }, ex.message),
-        h("button", { class: "btn", type: "button", onclick: () => { leaveJoin(); token = store.get(); start(); } }, "Go to log in")));
-    }
+    catch (ex) { return brokenLinkView(ex.message); }
     const err = h("p", { class: "err", role: "alert" });
     const form = h("form", { class: "card", onsubmit: async (e) => {
       e.preventDefault();
@@ -348,6 +351,37 @@
       err,
       h("button", { class: "btn", type: "submit" }, "Join team"),
       h("button", { class: "link", type: "button", onclick: () => { leaveJoin(); token = store.get(); start(); } }, "Already have an account? Log in"));
+    return h("div", { class: "auth" }, form);
+  }
+
+  /* ---------- Setting a new password from a reset link ---------- */
+  async function resetView(code) {
+    token = null; // the link is for the person resetting, not whoever was logged in here
+    let who;
+    try { who = await api("/api/password-resets/" + code); }
+    catch (ex) { return brokenLinkView(ex.message); }
+    const err = h("p", { class: "err", role: "alert" });
+    const form = h("form", { class: "card", onsubmit: async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(form));
+      const btn = $("button[type=submit]", form);
+      if (f.password !== f.confirm) { err.textContent = "The two passwords don’t match."; return; }
+      btn.disabled = true; err.textContent = "";
+      try {
+        const out = await api("/api/auth/reset-password", "POST", { code, password: f.password });
+        token = out.token; store.set(token); leaveJoin();
+        await loadData(); render();
+      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+    } },
+      h("div", { class: "logo" }, h("i"), "BuildFree"),
+      h("h1", {}, "Set a new password"),
+      h("p", { class: "sub", style: "margin:0" }, "For " + who.name + (who.company ? " at " + who.company : "") + ". You’ll be logged out everywhere else."),
+      h("label", {}, "Email", h("input", { type: "email", value: who.email, disabled: "", autocomplete: "username" })),
+      field("New password", "password", "password", "new-password"),
+      field("Type it again", "confirm", "password", "new-password"),
+      err,
+      h("button", { class: "btn", type: "submit" }, "Save and log in"),
+      h("button", { class: "link", type: "button", onclick: () => { leaveJoin(); token = store.get(); start(); } }, "Remembered it? Log in"));
     return h("div", { class: "auth" }, form);
   }
 
@@ -678,8 +712,15 @@
           h("b", {}, u.name, u.id === me.id ? h("span", { class: "you" }, " (you)") : null),
           h("span", { class: "sub hide-sm mono" }, u.email),
           roleCell(u),
-          h("div", { class: "tools" }, owner && u.id !== me.id && h("button", { class: "link danger", onclick: () =>
-            confirmDelete("Remove " + u.name + " from the team? They can’t log in anymore. Their daily logs and photos stay.", "/api/team/" + u.id) }, "Remove"))))),
+          h("div", { class: "tools" },
+            u.id === me.id && h("button", { class: "link", onclick: () => passwordDialog() }, "Change password"),
+            owner && u.id !== me.id && h("button", { class: "link", title: "Makes a link they can use to set a new password", onclick: async () => {
+              err.textContent = "";
+              try { resetLinkDialog(await api("/api/team/" + u.id + "/reset-link", "POST")); }
+              catch (ex) { err.textContent = ex.message; }
+            } }, "Reset password"),
+            owner && u.id !== me.id && h("button", { class: "link danger", onclick: () =>
+              confirmDelete("Remove " + u.name + " from the team? They can’t log in anymore. Their daily logs and photos stay.", "/api/team/" + u.id) }, "Remove"))))),
       team.invites.length ? h("div", { class: "group" },
         h("h2", {}, "Waiting to join (" + team.invites.length + ")"),
         h("div", { class: "list" }, team.invites.map(i => h("div", { class: "row team" },
@@ -714,19 +755,52 @@
   function linkDialog(out) {
     const link = location.href.split("#")[0] + "#join=" + out.code;
     const first = out.invite.name.split(" ")[0];
-    const msg = "You're invited to join our team on BuildFree. Set up your login here: " + link;
-    const input = h("input", { value: link, readonly: "", class: "mono", "aria-label": "Join link", onfocus: (e) => e.target.select() });
+    shareLinkDialog({
+      title: "Send this link to " + first,
+      note: "Text or email it to " + first + ". It works once and expires in 7 days. You won’t see this link again, but you can make a new one from the Team page.",
+      link, email: out.invite.email, subject: "Join our team on BuildFree",
+      msg: "You're invited to join our team on BuildFree. Set up your login here: " + link
+    });
+  }
+
+  // Shows a password reset link for someone on the team.
+  function resetLinkDialog(out) {
+    const link = location.href.split("#")[0] + "#reset=" + out.code;
+    const first = out.name.split(" ")[0];
+    shareLinkDialog({
+      title: "Reset link for " + first,
+      note: "Text or email it to " + first + ". It works once and expires in 24 hours. Their current password keeps working until they use it.",
+      link, email: out.email, subject: "Reset your BuildFree password",
+      msg: "Here's a link to set a new BuildFree password: " + link
+    });
+  }
+
+  function passwordDialog() {
+    dialog("Change your password", [
+      h("label", {}, "Current password", h("input", { name: "current", type: "password", required: true, autocomplete: "current-password" })),
+      h("label", {}, "New password", h("input", { name: "password", type: "password", required: true, minlength: 8, autocomplete: "new-password" })),
+      h("label", {}, "Type it again", h("input", { name: "confirm", type: "password", required: true, minlength: 8, autocomplete: "new-password" })),
+      h("p", { class: "sub", style: "margin:0" }, "You’ll stay logged in here and be logged out on every other device.")
+    ], "Change password", async (f) => {
+      if (f.password !== f.confirm) throw new Error("The two new passwords don’t match.");
+      const out = await api("/api/me/password", "PUT", { currentPassword: f.current, newPassword: f.password });
+      token = out.token; store.set(token);
+    });
+  }
+
+  function shareLinkDialog({ title, note, link, msg, email, subject }) {
+    const input = h("input", { value: link, readonly: "", class: "mono", "aria-label": "Link", onfocus: (e) => e.target.select() });
     const copyBtn = h("button", { class: "btn", type: "button", onclick: async () => {
       try { await navigator.clipboard.writeText(link); } catch { input.focus(); input.select(); document.execCommand("copy"); }
       copyBtn.textContent = "Copied";
     } }, "Copy link");
     const dlg = h("dialog", {}, h("div", { class: "dlg" },
-      h("h2", {}, "Send this link to " + first),
-      h("p", { class: "sub", style: "margin:0" }, "Text or email it to " + first + ". It works once and expires in 7 days. You won’t see this link again, but you can make a new one from the Team page."),
+      h("h2", {}, title),
+      h("p", { class: "sub", style: "margin:0" }, note),
       input,
       h("div", { class: "actions" },
         h("a", { class: "btn ghost", href: "sms:?&body=" + encodeURIComponent(msg) }, "Text it"),
-        h("a", { class: "btn ghost", href: "mailto:" + encodeURIComponent(out.invite.email) + "?subject=" + encodeURIComponent("Join our team on BuildFree") + "&body=" + encodeURIComponent(msg) }, "Email it"),
+        h("a", { class: "btn ghost", href: "mailto:" + encodeURIComponent(email) + "?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(msg) }, "Email it"),
         copyBtn,
         h("button", { class: "btn ghost", type: "button", onclick: () => dlg.close() }, "Done"))));
     dlg.addEventListener("close", () => dlg.remove());
@@ -818,10 +892,12 @@
   async function start() {
     const code = joinCode();
     if (code) { mount(await joinView(code)); return; }
+    const reset = resetCode();
+    if (reset) { mount(await resetView(reset)); return; }
     if (token) { try { await loadData(); } catch { token = null; store.set(null); } }
     render();
   }
-  window.addEventListener("hashchange", () => { if (joinCode()) start(); });
+  window.addEventListener("hashchange", () => { if (joinCode() || resetCode()) start(); });
   start();
 </script>
 <script src="estimates.js"></script>

@@ -78,7 +78,16 @@ call POST /api/auth/login "" "{\"email\":\"alpha$RUN@example.com\",\"password\":
 call POST /api/auth/signup "" "{\"companyName\":\"X\",\"name\":\"X\",\"email\":\"alpha$RUN@example.com\",\"password\":\"changeme123\"}" 409
 call POST /api/auth/signup "" "{\"companyName\":\"X\",\"name\":\"X\",\"email\":\"short$RUN@example.com\",\"password\":\"short\"}" 400
 call POST /api/auth/signup "" "{\"companyName\":\"X\",\"name\":\"X\",\"email\":\"not-an-email\",\"password\":\"changeme123\"}" 400
+LONGPW="$(printf 'a%.0s' {1..73})"
+call POST /api/auth/signup "" "{\"companyName\":\"X\",\"name\":\"X\",\"email\":\"long$RUN@example.com\",\"password\":\"$LONGPW\"}" 400
 call GET /api/projects "" "" 401
+
+echo "== Security headers"
+HDRS="$(curl -s -D - -o /dev/null "$API/api/projects" -H "Authorization: Bearer $A")"
+for hdr in "X-Content-Type-Options: nosniff" "X-Frame-Options: DENY" "Referrer-Policy: no-referrer"; do
+  grep -qi "^$hdr" <<< "$HDRS" || { echo "FAIL: missing header $hdr"; exit 1; }
+done
+PASS=$((PASS + 1)); echo "ok   security headers on every response"
 
 echo "== Clients"
 call POST /api/clients "$A" '{"name":"Maria Lopez","email":"maria@example.com","phone":"619-555-0100"}' 201
@@ -194,6 +203,17 @@ call DELETE "/api/clients/$OCLIENT" "$O" "" 204
 call PUT "/api/photos/$FPHOTO" "$O" '{"caption":"West wall framing"}' 200
 call POST /api/team/invites "$O" "{\"name\":\"X\",\"email\":\"z$RUN@example.com\",\"role\":2}" 403
 call PUT "/api/team/$FID/role" "$O" '{"role":1}' 403
+
+echo "== Changing your password signs out other devices"
+call PUT /api/me/password "$O" '{"currentPassword":"wrong-password","newPassword":"newpass456"}' 400
+call PUT /api/me/password "$O" '{"currentPassword":"changeme123","newPassword":"short"}' 400
+call PUT /api/me/password "$O" '{"currentPassword":"changeme123","newPassword":"newpass456"}' 200
+O2="$(field .token)"
+call GET /api/me "$O" "" 401
+call GET /api/me "$O2" "" 200
+O="$O2"
+call POST /api/auth/login "" "{\"email\":\"office$RUN@example.com\",\"password\":\"changeme123\"}" 401
+call POST /api/auth/login "" "{\"email\":\"office$RUN@example.com\",\"password\":\"newpass456\"}" 200
 
 echo "== Estimates"
 EST='{"title":"Kitchen remodel","markupPercent":25,"taxPercent":7.75,"notes":"Valid for 30 days.","items":[{"description":"Demo and haul away","category":0,"quantity":10,"unit":"hr","unitCost":65},{"description":"Cabinets","category":1,"quantity":3,"unit":"ea","unitCost":120}]}'
@@ -339,6 +359,28 @@ call GET "/api/invoices/$INV1" "$A" "" 200
 PAY2="$(field '.payments[0].id')"
 call DELETE "/api/payments/$PAY2" "$B" "" 404
 
+echo "== Password reset links"
+call POST "/api/team/$FID/reset-link" "$F" "" 403
+call POST "/api/team/$FID/reset-link" "$O" "" 403
+call POST "/api/team/$FID/reset-link" "$B" "" 404
+call POST "/api/team/$AID/reset-link" "$A" "" 400
+call POST "/api/team/$FID/reset-link" "$A" "" 200
+RCODE="$(field .code)"
+[[ "$(field .email)" == "field$RUN@example.com" ]] || { echo "FAIL: reset link for the wrong person: $BODY"; exit 1; }
+call GET "/api/password-resets/$RCODE" "" "" 200
+[[ "$(field .name)" == "Frank R" && "$(field .company)" == "Alpha Builders" ]] || { echo "FAIL: reset lookup wrong: $BODY"; exit 1; }
+call GET /api/password-resets/not-a-real-code "" "" 404
+[[ "${RCODE:40:1}" == "A" ]] && SWAP=B || SWAP=A
+call GET "/api/password-resets/${RCODE:0:40}$SWAP${RCODE:41}" "" "" 404
+call POST /api/auth/reset-password "" "{\"code\":\"$RCODE\",\"password\":\"short\"}" 400
+call POST /api/auth/reset-password "" "{\"code\":\"$RCODE\",\"password\":\"resetpass789\"}" 200
+F2="$(field .token)"
+call GET /api/me "$F" "" 401
+call GET /api/me "$F2" "" 200
+F="$F2"
+call POST /api/auth/reset-password "" "{\"code\":\"$RCODE\",\"password\":\"another123\"}" 404
+call POST /api/auth/login "" "{\"email\":\"field$RUN@example.com\",\"password\":\"resetpass789\"}" 200
+
 echo "== Owner manages roles"
 call GET /api/team "$B" "" 200
 [[ "$(field '.members | length')" == "1" ]] || { echo "FAIL: company B can see company A's team"; exit 1; }
@@ -394,6 +436,14 @@ upload "/api/logs/$LOG/photos" "$B" 404 "$PNG"
 call PUT "/api/photos/$PHOTO" "$B" '{"caption":"Hacked"}' 404
 call DELETE "/api/photos/$PHOTO" "$B" "" 404
 
+echo "== Too many wrong passwords lock the email for a while"
+for n in 1 2 3 4 5; do
+  call POST /api/auth/login "" "{\"email\":\"bravo$RUN@example.com\",\"password\":\"wrong-password\"}" 401
+done
+call POST /api/auth/login "" "{\"email\":\"bravo$RUN@example.com\",\"password\":\"changeme123\"}" 429
+[[ "$(field .error)" == "Too many wrong passwords"* ]] || { echo "FAIL: lockout message wrong: $BODY"; exit 1; }
+call GET /api/me "$B" "" 200
+
 echo "== Two people creating at the same moment get different numbers"
 call POST /api/projects "$B" '{"name":"Bravo job"}' 201
 BJOB="$(field .id)"
@@ -435,6 +485,17 @@ getfile "/api/photos/$PHOTO3" "$A" 404
 call GET "/api/estimates/$ESTCOPY" "$A" "" 404
 call GET "/api/estimates/$CO1" "$A" "" 404
 call GET "/api/invoices/$INV1" "$A" "" 404
+
+# Last, because it uses up this network's login tries for a minute.
+echo "== Too many tries from one network get slowed down"
+LIMITED=""
+for n in $(seq 1 130); do
+  if [[ "$(curl -s -o /tmp/smoke_body -w "%{http_code}" "$API/api/invites/not-a-real-code")" == "429" ]]; then LIMITED=$n; break; fi
+done
+[[ -n "$LIMITED" ]] || { echo "FAIL: 130 tries in a row were never slowed down"; exit 1; }
+BODY="$(cat /tmp/smoke_body)"
+[[ "$(field .error)" == "Too many tries. Wait a minute and try again." ]] || { echo "FAIL: rate limit message wrong: $BODY"; exit 1; }
+PASS=$((PASS + 1)); echo "ok   slowed down after $LIMITED quick tries -> 429"
 
 echo
 echo "All $PASS checks passed."

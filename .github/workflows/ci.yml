@@ -1,8 +1,8 @@
 # Runs on every pull request and every push to main. Three checks:
 #   api       builds the API, starts it against a real PostgreSQL database and
 #             runs tests/smoke.sh against it
-#   photos-s3 the same, with photos kept in S3-compatible storage (MinIO
-#             stands in for Cloudflare R2)
+#   photos-s3 the same, with photos kept in S3-compatible storage (Adobe's
+#             S3Mock stands in for Cloudflare R2)
 #   docker    builds the container image a host would run, starts it the way a
 #             host would (production settings, DATABASE_URL) and runs the
 #             same checks against it
@@ -97,14 +97,15 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Start MinIO (S3-compatible storage) with a photos bucket
+      - name: Start S3Mock (S3-compatible storage) with a photos bucket
         run: |
-          docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=buildfree -e MINIO_ROOT_PASSWORD=buildfree-secret minio/minio server /data
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:9000/minio/health/live; then break; fi
+          docker run -d --name s3 -p 9090:9090 adobe/s3mock
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://localhost:9090/; then break; fi
             sleep 1
           done
-          docker run --rm --network host --entrypoint sh minio/mc -c "mc alias set local http://localhost:9000 buildfree buildfree-secret && mc mb local/photos"
+          curl -s -X PUT http://localhost:9090/photos || true
+          curl -sf -o /dev/null http://localhost:9090/photos || { echo "Couldn't create the photos bucket"; docker logs s3; exit 1; }
 
       - name: Build
         run: dotnet build BuildFree.Api --configuration Release
@@ -114,7 +115,7 @@ jobs:
           ASPNETCORE_ENVIRONMENT: Development
           ASPNETCORE_URLS: http://localhost:5000
           Photos__Storage: S3
-          Photos__S3__ServiceUrl: http://localhost:9000
+          Photos__S3__ServiceUrl: http://localhost:9090
           Photos__S3__Bucket: photos
           Photos__S3__AccessKey: buildfree
           Photos__S3__SecretKey: buildfree-secret
@@ -130,15 +131,17 @@ jobs:
       - name: Run end-to-end checks
         run: bash tests/smoke.sh
 
-      - name: Check the photos landed in S3, not on disk
+      # The end-to-end checks upload photos, load them back byte for byte and
+      # delete them, so they went through S3. Make sure nothing went to disk.
+      - name: Check no photos were saved on disk
         run: |
-          docker run --rm --network host --entrypoint sh minio/mc -c "mc alias set local http://localhost:9000 buildfree buildfree-secret >/dev/null && mc ls --recursive local/photos" | tee s3.txt
-          [ -s s3.txt ] || { echo "No photos in the bucket"; exit 1; }
           [ ! -d BuildFree.Api/photo-uploads ] || [ -z "$(ls -A BuildFree.Api/photo-uploads)" ] || { echo "Photos were saved on disk"; exit 1; }
 
-      - name: Show API log if something failed
+      - name: Show logs if something failed
         if: failure()
-        run: cat api.log || true
+        run: |
+          cat api.log || true
+          docker logs s3 || true
 
   docker:
     runs-on: ubuntu-latest

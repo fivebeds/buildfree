@@ -82,7 +82,6 @@ public static class Estimates
                 AccountId = accountId,
                 ProjectId = source.ProjectId,
                 Kind = source.Kind,
-                Number = await NextNumber(db, accountId, source.Kind),
                 DaysAdded = source.DaysAdded,
                 Title = source.Title,
                 Notes = source.Notes,
@@ -101,7 +100,7 @@ public static class Estimates
             }).ToList();
             db.Estimates.Add(copy);
             db.EstimateItems.AddRange(items);
-            await db.SaveChangesAsync();
+            await Saving.SaveNumbered(db, () => NextNumber(db, accountId, copy.Kind), n => copy.Number = n);
             return Results.Created($"/api/estimates/{copy.Id}", View(copy, items));
         });
 
@@ -109,6 +108,8 @@ public static class Estimates
         {
             var (estimate, items) = await Load(db, id, AccountId(me));
             if (estimate is null) return Results.NotFound();
+            if (estimate.Status == EstimateStatus.Approved)
+                return Results.Conflict(new { error = $"This {Name(estimate.Kind)} is approved, so it can't be deleted. If it was approved by mistake, change its status first." });
             db.EstimateItems.RemoveRange(items);
             db.Estimates.Remove(estimate);
             await db.SaveChangesAsync();
@@ -205,14 +206,13 @@ public static class Estimates
         {
             AccountId = accountId,
             ProjectId = projectId,
-            Kind = kind,
-            Number = await NextNumber(db, accountId, kind)
+            Kind = kind
         };
         Apply(estimate, r);
         var items = MakeItems(estimate, r.Items!);
         db.Estimates.Add(estimate);
         db.EstimateItems.AddRange(items);
-        await db.SaveChangesAsync();
+        await Saving.SaveNumbered(db, () => NextNumber(db, accountId, kind), n => estimate.Number = n);
         return Results.Created($"/api/estimates/{estimate.Id}", View(estimate, items));
     }
 

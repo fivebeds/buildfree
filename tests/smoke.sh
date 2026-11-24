@@ -85,6 +85,9 @@ call POST /api/clients "$A" '{"name":"Maria Lopez","email":"maria@example.com","
 CLIENT="$(field .id)"
 call POST /api/clients "$A" '{"name":"   "}' 400
 call POST /api/clients "$A" '{"name":"Bad Email","email":"nope"}' 400
+call POST /api/clients "$A" '{"name": "Broken JSON' 400
+[[ "$(field .error)" == "The request couldn't be read. Check the fields and try again." ]] || { echo "FAIL: broken JSON should get a clear message: $BODY"; exit 1; }
+call PUT "/api/projects/$CLIENT/status" "$A" '{"status":"not a number"}' 400
 call PUT "/api/clients/$CLIENT" "$A" '{"name":"Maria Lopez-Garcia","email":"maria@example.com","phone":""}' 200
 [[ "$(field .name)" == "Maria Lopez-Garcia" && "$(field .phone)" == "null" ]] || { echo "FAIL: client edit not saved"; exit 1; }
 
@@ -216,6 +219,7 @@ call GET "/api/estimates/$ESTID" "$A" "" 200
 [[ "$(field '.items[0].unitPrice == 120')" == "true" ]] || { echo "FAIL: saved estimate wrong"; exit 1; }
 call PUT "/api/estimates/$ESTID/status" "$A" '{"status":9}' 400
 call PUT "/api/estimates/$ESTID/status" "$A" '{"status":2}' 200
+call DELETE "/api/estimates/$ESTID" "$A" "" 409
 call PUT "/api/estimates/$ESTID" "$A" '{"title":"Change after approval","items":[{"description":"X","category":1,"quantity":1,"unitCost":5}]}' 409
 call POST "/api/estimates/$ESTID/copy" "$A" "" 201
 ESTCOPY="$(field .id)"
@@ -309,6 +313,7 @@ INV2="$(field .id)"
 [[ "$(field '.number')" == "2" ]] || { echo "FAIL: second invoice number wrong"; exit 1; }
 call PUT "/api/invoices/$INV2/status" "$A" '{"status":1}' 200
 [[ "$(field '.state')" == "overdue" ]] || { echo "FAIL: past-due invoice should be overdue: $BODY"; exit 1; }
+call DELETE "/api/invoices/$INV2" "$A" "" 409
 call GET "/api/projects/$JOB/billing" "$A" "" 200
 [[ "$(field '.overdueCount == 1 and .invoiced == 300')" == "true" ]] || { echo "FAIL: overdue count wrong: $BODY"; exit 1; }
 call PUT "/api/invoices/$INV2/status" "$A" '{"status":2}' 200
@@ -389,6 +394,20 @@ upload "/api/logs/$LOG/photos" "$B" 404 "$PNG"
 call PUT "/api/photos/$PHOTO" "$B" '{"caption":"Hacked"}' 404
 call DELETE "/api/photos/$PHOTO" "$B" "" 404
 
+echo "== Two people creating at the same moment get different numbers"
+call POST /api/projects "$B" '{"name":"Bravo job"}' 201
+BJOB="$(field .id)"
+: > /tmp/smoke_parallel
+for n in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST "$API/api/projects/$BJOB/invoices" -H "Content-Type: application/json" -H "Authorization: Bearer $B" \
+    -d '{"title":"Same time","lines":[{"description":"X","amount":10}]}' >> /tmp/smoke_parallel &
+done
+wait
+[[ "$(grep -c '^201$' /tmp/smoke_parallel)" == "6" ]] || { echo "FAIL: parallel invoices didn't all save: $(tr '\n' ' ' < /tmp/smoke_parallel)"; exit 1; }
+PASS=$((PASS + 1)); echo "ok   6 invoices created at once -> all 201"
+call GET "/api/projects/$BJOB/invoices" "$B" "" 200
+[[ "$(field '[.[].number] | unique | length')" == "6" && "$(field '[.[].number] | max')" == "6" ]] || { echo "FAIL: parallel invoices got duplicate numbers: $BODY"; exit 1; }
+
 echo "== Deleting"
 call DELETE "/api/todos/$TODO" "$A" "" 204
 call DELETE "/api/logs/$LOG" "$A" "" 204
@@ -401,6 +420,12 @@ LOG2="$(field .id)"
 upload "/api/logs/$LOG2/photos" "$A" 201 "$PNG"
 PHOTO3="$(field '.[0].id')"
 call POST "/api/projects/$JOB/todos" "$A" '{"title":"Second to-do"}' 201
+call DELETE "/api/projects/$JOB" "$A" "" 409
+call DELETE "/api/payments/$PAY2" "$A" "" 204
+call PUT "/api/invoices/$INV1/status" "$A" '{"status":0}' 200
+call PUT "/api/estimates/$ESTID/status" "$A" '{"status":0}' 200
+call DELETE "/api/projects/$JOB" "$A" "" 409
+call PUT "/api/estimates/$CO1/status" "$A" '{"status":0}' 200
 call DELETE "/api/projects/$JOB" "$A" "" 204
 call GET "/api/projects/$JOB/logs" "$A" "" 200
 [[ "$(field 'length')" == "0" ]] || { echo "FAIL: logs left behind after job delete"; exit 1; }

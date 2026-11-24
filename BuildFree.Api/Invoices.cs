@@ -41,17 +41,14 @@ public static class Invoices
             var accountId = AccountId(me);
             if (!await db.Projects.AnyAsync(p => p.Id == id && p.AccountId == accountId)) return Results.NotFound();
             if (Check(r) is IResult bad) return bad;
-            var invoice = new Invoice
-            {
-                AccountId = accountId,
-                ProjectId = id,
-                Number = (await db.Invoices.Where(i => i.AccountId == accountId).MaxAsync(i => (int?)i.Number) ?? 0) + 1
-            };
+            var invoice = new Invoice { AccountId = accountId, ProjectId = id };
             Apply(invoice, r);
             var lines = MakeLines(invoice, r.Lines!);
             db.Invoices.Add(invoice);
             db.InvoiceLines.AddRange(lines);
-            await db.SaveChangesAsync();
+            await Saving.SaveNumbered(db,
+                async () => (await db.Invoices.Where(i => i.AccountId == accountId).MaxAsync(i => (int?)i.Number) ?? 0) + 1,
+                n => invoice.Number = n);
             return Results.Created($"/api/invoices/{invoice.Id}", View(invoice, lines, Array.Empty<Payment>()));
         });
 
@@ -126,6 +123,7 @@ public static class Invoices
             var (invoice, lines, paid) = await Load(db, id, AccountId(me));
             if (invoice is null) return Results.NotFound();
             if (paid.Count > 0) return Results.Conflict(new { error = "This invoice has payments, so it can't be deleted. Void it or delete the payments first." });
+            if (invoice.Status == InvoiceStatus.Sent) return Results.Conflict(new { error = "This invoice was sent, so it can't be deleted. Void it instead, so there's a record of it." });
             db.InvoiceLines.RemoveRange(lines);
             db.Invoices.Remove(invoice);
             await db.SaveChangesAsync();

@@ -36,6 +36,17 @@ jobs:
       - name: Build
         run: dotnet build BuildFree.Api --configuration Release
 
+      # Once the project has migrations, every model change needs one too.
+      # This fails the build if someone changed a model and forgot, so the
+      # online database can always be upgraded without losing data.
+      - name: Check for model changes without a migration
+        if: hashFiles('BuildFree.Api/Migrations/*.cs') != ''
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+        run: |
+          dotnet tool install --global dotnet-ef --version "10.*"
+          dotnet ef migrations has-pending-model-changes --project BuildFree.Api
+
       - name: Start the API
         env:
           ASPNETCORE_ENVIRONMENT: Development

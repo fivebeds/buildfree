@@ -7,14 +7,19 @@ using System.Threading.RateLimiting;
 using BuildFree.Api;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddDbContext<AppDbContext>(o =>
-    o.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+// The database. A DATABASE_URL setting (postgres://...), which many hosts
+// provide, wins over ConnectionStrings:Default.
+var connectionString = HostSettings.FromDatabaseUrl(builder.Configuration["DATABASE_URL"])
+    ?? builder.Configuration.GetConnectionString("Default");
+builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(connectionString));
 
 // The signing key proves a login token came from this server. Refuse to start
 // online with the sample key from appsettings.json, since anyone can read it.
@@ -40,12 +45,40 @@ builder.Services
     });
 builder.Services.AddAuthorization();
 
-// Job-site photos are saved as files (see PhotoStore.cs). Set Photos:Path to
-// choose the folder; by default it's "photo-uploads" next to the API.
-var photosPath = builder.Configuration["Photos:Path"];
-if (string.IsNullOrWhiteSpace(photosPath))
-    photosPath = Path.Combine(builder.Environment.ContentRootPath, "photo-uploads");
-builder.Services.AddSingleton<IPhotoStore>(new DiskPhotoStore(photosPath));
+// Job-site photos (see PhotoStore.cs). By default they're files in a folder:
+// Photos:Path, or "photo-uploads" next to the API. Online, use S3-compatible
+// storage such as Cloudflare R2 instead (Photos:Storage = S3), because many
+// hosts wipe their disks on every deploy.
+if (string.Equals(builder.Configuration["Photos:Storage"], "S3", StringComparison.OrdinalIgnoreCase))
+{
+    string S3Setting(string name) => builder.Configuration["Photos:S3:" + name] is { Length: > 0 } value
+        ? value
+        : throw new InvalidOperationException($"Set Photos:S3:{name} (or Photos__S3__{name}) to store photos in S3.");
+    builder.Services.AddSingleton<IPhotoStore>(new S3PhotoStore(S3Setting("ServiceUrl"), S3Setting("Bucket"),
+        S3Setting("AccessKey"), S3Setting("SecretKey"), builder.Configuration["Photos:S3:Region"] ?? "auto"));
+}
+else
+{
+    var photosPath = builder.Configuration["Photos:Path"];
+    if (string.IsNullOrWhiteSpace(photosPath))
+        photosPath = Path.Combine(builder.Environment.ContentRootPath, "photo-uploads");
+    builder.Services.AddSingleton<IPhotoStore>(new DiskPhotoStore(photosPath));
+}
+
+// Online, a hosting provider's proxy sits in front of the API and passes the
+// visitor's address and https along in X-Forwarded-* headers. Trust them only
+// when the API can't be reached any other way, by setting
+// Proxy:TrustForwardedHeaders to true. Without it, every visitor would share
+// one login limit (the proxy's address).
+var trustProxy = builder.Configuration.GetValue("Proxy:TrustForwardedHeaders", false);
+if (trustProxy)
+    builder.Services.Configure<ForwardedHeadersOptions>(o =>
+    {
+        o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        o.KnownNetworks.Clear();
+        o.KnownProxies.Clear();
+        o.ForwardLimit = 1;
+    });
 
 // Which websites may call the API from a browser. Set Cors:Origins (or the
 // Cors__Origins environment variable) to the web app's address, for example
@@ -82,6 +115,8 @@ builder.Services.AddRateLimiter(o =>
 builder.Services.Configure<RouteHandlerOptions>(o => o.ThrowOnBadRequest = true);
 
 var app = builder.Build();
+
+if (trustProxy) app.UseForwardedHeaders();
 
 // Basic browser protections on every response: don't guess file types, don't
 // show the API inside another site's frame, and don't leak addresses.
@@ -125,6 +160,22 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     if (db.Database.GetMigrations().Any()) db.Database.Migrate();
     else db.Database.EnsureCreated();
+}
+
+// Online, browsers are told to always use https for this site.
+if (!app.Environment.IsDevelopment()) app.UseHsts();
+
+// The web app is served from the same address as the API, so it works online
+// without any extra setup. Files are checked for changes on every visit.
+if (HostSettings.WebFolder(app.Environment.ContentRootPath, app.Configuration["Web:Path"]) is string webFolder)
+{
+    var webFiles = new PhysicalFileProvider(webFolder);
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = webFiles });
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        FileProvider = webFiles,
+        OnPrepareResponse = file => file.Context.Response.Headers.CacheControl = "no-cache"
+    });
 }
 
 app.UseCors();
@@ -292,6 +343,15 @@ static IResult? CheckProject(ProjectRequest r)
         return Bad("End date can't be before the start date.");
     return null;
 }
+
+// ---------- Health ----------
+
+// For the hosting provider's health check: 200 when the API is up and can
+// reach the database, 503 when it can't.
+app.MapGet("/api/health", async (AppDbContext db) =>
+    await db.Database.CanConnectAsync()
+        ? Results.Ok(new { status = "ok" })
+        : Results.Json(new { status = "The database can't be reached." }, statusCode: StatusCodes.Status503ServiceUnavailable));
 
 // ---------- Auth ----------
 

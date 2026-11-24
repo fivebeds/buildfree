@@ -892,7 +892,8 @@ app.MapPost("/api/auth/accept-invite", async (AcceptInviteRequest r, AppDbContex
 // token for this one.
 app.MapPut("/api/me/password", async (PasswordChangeRequest r, HttpContext ctx, AppDbContext db) =>
 {
-    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == Me(ctx).Id);
+    var myId = Me(ctx).Id;
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == myId);
     if (user is null) return Results.Unauthorized();
     if (string.IsNullOrEmpty(r.CurrentPassword) || !BCrypt.Net.BCrypt.Verify(r.CurrentPassword, user.PasswordHash))
         return Bad("Your current password isn't right.");

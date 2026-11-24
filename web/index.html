@@ -206,8 +206,9 @@
 <div id="print"></div>
 
 <script>
-  // Where the API is running. Change this when the API is hosted online.
-  const API = "http://localhost:5000";
+  // Where the API is. The API serves this page itself, so it's the same
+  // address; opened straight from disk, it's the API running on this computer.
+  const API = location.protocol === "file:" ? "http://localhost:5000" : "";
   const STATUS = [
     { label: "Planning", color: "var(--b-plan)" },
     { label: "Active", color: "var(--b-active)" },

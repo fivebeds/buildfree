@@ -1,5 +1,11 @@
-# Runs on every pull request and every push to main: builds the API, starts it
-# against a real PostgreSQL database, and runs tests/smoke.sh against it.
+# Runs on every pull request and every push to main. Three checks:
+#   api       builds the API, starts it against a real PostgreSQL database and
+#             runs tests/smoke.sh against it
+#   photos-s3 the same, with photos kept in S3-compatible storage (Adobe's
+#             S3Mock stands in for Cloudflare R2)
+#   docker    builds the container image a host would run, starts it the way a
+#             host would (production settings, DATABASE_URL) and runs the
+#             same checks against it
 name: Build and test
 
 on:
@@ -65,3 +71,118 @@ jobs:
       - name: Show API log if something failed
         if: failure()
         run: cat api.log || true
+
+  photos-s3:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: buildfree
+          POSTGRES_PASSWORD: buildfree
+          POSTGRES_DB: buildfree
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U buildfree"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Start S3Mock (S3-compatible storage) with a photos bucket
+        run: |
+          docker run -d --name s3 -p 9090:9090 adobe/s3mock
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://localhost:9090/; then break; fi
+            sleep 1
+          done
+          curl -s -X PUT http://localhost:9090/photos || true
+          curl -sf -o /dev/null http://localhost:9090/photos || { echo "Couldn't create the photos bucket"; docker logs s3; exit 1; }
+
+      - name: Build
+        run: dotnet build BuildFree.Api --configuration Release
+
+      - name: Start the API with S3 photo storage
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+          ASPNETCORE_URLS: http://localhost:5000
+          Photos__Storage: S3
+          Photos__S3__ServiceUrl: http://localhost:9090
+          Photos__S3__Bucket: photos
+          Photos__S3__AccessKey: buildfree
+          Photos__S3__SecretKey: buildfree-secret
+          Photos__S3__Region: us-east-1
+        run: |
+          nohup dotnet run --project BuildFree.Api --configuration Release --no-build --no-launch-profile > api.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -s -o /dev/null http://localhost:5000/api/health; then echo "API is up"; exit 0; fi
+            sleep 1
+          done
+          echo "API did not start:"; cat api.log; exit 1
+
+      - name: Run end-to-end checks
+        run: bash tests/smoke.sh
+
+      # The end-to-end checks upload photos, load them back byte for byte and
+      # delete them, so they went through S3. Make sure nothing went to disk.
+      - name: Check no photos were saved on disk
+        run: |
+          [ ! -d BuildFree.Api/photo-uploads ] || [ -z "$(ls -A BuildFree.Api/photo-uploads)" ] || { echo "Photos were saved on disk"; exit 1; }
+
+      - name: Show logs if something failed
+        if: failure()
+        run: |
+          cat api.log || true
+          docker logs s3 || true
+
+  docker:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: buildfree
+          POSTGRES_PASSWORD: buildfree
+          POSTGRES_DB: buildfree
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U buildfree"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the container image
+        run: docker build -t buildfree .
+
+      - name: Start it the way a host would
+        run: |
+          docker run -d --name app --network host \
+            -e DATABASE_URL=postgres://buildfree:buildfree@localhost:5432/buildfree \
+            -e Jwt__Key=ci-only-key-not-secret-0123456789abcdefghij \
+            -e Proxy__TrustForwardedHeaders=true \
+            buildfree
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://localhost:8080/api/health; then echo "Container is up"; exit 0; fi
+            sleep 1
+          done
+          echo "Container did not start:"; docker logs app; exit 1
+
+      - name: Run end-to-end checks against the container
+        run: API=http://localhost:8080 bash tests/smoke.sh
+
+      - name: Show container log if something failed
+        if: failure()
+        run: docker logs app || true

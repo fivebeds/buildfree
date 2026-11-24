@@ -18,7 +18,7 @@ Estimate, change order and invoice approval by the homeowner, online payments, a
 
 ## Stack
 
-The backend is C# with ASP.NET Core Web API and Entity Framework Core. The database is PostgreSQL. Photos are saved as files through a small storage interface (`BuildFree.Api/PhotoStore.cs`): on disk for now, with S3-compatible storage (Cloudflare R2) planned for production behind the same interface. The frontend starts as plain JavaScript pages calling the REST API and will move to React later. Docker Compose runs the database locally.
+The backend is C# with ASP.NET Core Web API and Entity Framework Core. The database is PostgreSQL. Photos are saved through a small storage interface (`BuildFree.Api/PhotoStore.cs`): in a folder on disk, or in S3-compatible storage such as Cloudflare R2 once online. The frontend starts as plain JavaScript pages calling the REST API and will move to React later. Docker Compose runs the database locally.
 
 ## Run locally
 
@@ -42,7 +42,7 @@ That returns a token. Send it as `Authorization: Bearer <token>` to `/api/projec
 
 ## Run the web app
 
-With the API running, open `web/index.html` in your browser. Create an account on the sign up screen, then add clients and projects. The page talks to the API at `http://localhost:5000`, which you can change at the top of the script when the API is hosted online.
+With the API running, go to http://localhost:5000. The API serves the web app from the `web` folder, so the app and the API share one address (online too). Create an account on the sign up screen, then add clients and projects. Opening `web/index.html` straight from disk also works; it then talks to the API at `http://localhost:5000`.
 
 ## API
 
@@ -50,6 +50,7 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 
 | Method | Path | What it does |
 |---|---|---|
+| GET | `/api/health` | No login needed. 200 when the API is up and can reach the database, 503 when it can't (for the host's health check) |
 | POST | `/api/auth/signup` | Create a company and its first user, returns a token |
 | POST | `/api/auth/login` | Log in, returns a token |
 | GET, POST | `/api/clients` | List or add clients |
@@ -96,7 +97,7 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 
 Photos attach to daily logs. The API accepts JPEG, PNG, GIF and WebP, checked by the file's contents rather than its name. Limits: 10 MB per photo, 10 photos per upload, 30 per log. The web app shrinks phone photos to at most 2,000 pixels on the long side before uploading (usually a few hundred KB), turns them upright, and uploads them in groups of 10.
 
-Uploaded files go in `BuildFree.Api/photo-uploads/` by default (ignored by git). Set `Photos:Path` in configuration, or the `Photos__Path` environment variable, to use another folder. If your local database was created before photos existed, reset it once with `docker compose down -v` then `docker compose up -d` so the photos table gets created.
+Uploaded files go in `BuildFree.Api/photo-uploads/` by default (ignored by git). Set `Photos:Path` in configuration, or the `Photos__Path` environment variable, to use another folder. Online, keep them in S3-compatible storage instead; see "Going online". If your local database was created before photos existed, reset it once with `docker compose down -v` then `docker compose up -d` so the photos table gets created.
 
 ## Estimates
 
@@ -143,7 +144,7 @@ If your local database was created before team members existed, reset it once wi
 - **Which websites can call the API:** set `Cors:Origins` to the web app's address. Outside development with nothing set, no other website can call it.
 - Every response tells browsers not to guess file types, not to show the API inside another site, and not to send the page address along.
 
-Before going online behind a hosting provider's proxy, the API has to be told to trust the proxy's forwarded address, or every visitor shares one network limit. That's part of hosting prep.
+Behind a hosting provider's proxy, set `Proxy:TrustForwardedHeaders` to `true` so the API sees each visitor's real address (see "Going online"). Without it, every visitor shares one network limit.
 
 ## Tests
 
@@ -182,8 +183,43 @@ Once a `Migrations` folder exists, the regular checks on every pull request fail
 
 `Jwt:Key` in `appsettings.json` is a sample for local development only. Outside development the API refuses to start with it; set a real random key of 32+ characters with the `Jwt__Key` environment variable. Changing the key logs everyone out and makes every reset link stop working.
 
-`Cors:Origins` (or `Cors__Origins`) lists the web addresses allowed to call the API, separated by commas, for example `https://app.buildfree.org`. `RateLimits:AuthPerMinute` (or `RateLimits__AuthPerMinute`) changes the per-network limit on login and password tries (60 by default).
+`Cors:Origins` (or `Cors__Origins`) lists the web addresses allowed to call the API, separated by commas, for example `https://app.buildfree.org`. It's only needed when the web app is hosted somewhere other than the API. `RateLimits:AuthPerMinute` (or `RateLimits__AuthPerMinute`) changes the per-network limit on login and password tries (60 by default). `Web:Path` points the API at a different folder for the web app. The rest of the settings for running online are under "Going online".
+
+## Going online
+
+BuildFree runs online as one Docker container (see `Dockerfile`) plus a PostgreSQL database. The container serves the web app and the API from the same address, listens on port **8080**, and has a health check at `/api/health`. Most hosts that run Docker containers work, for example Render, Railway, Fly.io, DigitalOcean App Platform or Azure Container Apps. The host gives you https.
+
+**1. A database.** Use the host's managed PostgreSQL (version 16 or newer), which also takes daily backups; check that backups are turned on and how long they're kept. Give the API its address in one of two ways:
+
+- `DATABASE_URL`, like `postgres://user:password@host:5432/buildfree?sslmode=require` (what most hosts hand out), or
+- `ConnectionStrings__Default`, like `Host=...;Port=5432;Database=buildfree;Username=...;Password=...;SSL Mode=Require`.
+
+The API creates and upgrades the tables itself on startup (see "Database migrations").
+
+**2. Photo storage.** Many hosts wipe the container's disk on every deploy, so keep photos in S3-compatible storage. With Cloudflare R2: create a bucket (for example `buildfree-photos`, kept private), then create an R2 API token with read and write access to that bucket, and set:
+
+| Setting | Value |
+|---|---|
+| `Photos__Storage` | `S3` |
+| `Photos__S3__ServiceUrl` | `https://<your account id>.r2.cloudflarestorage.com` |
+| `Photos__S3__Bucket` | the bucket name |
+| `Photos__S3__AccessKey` | the token's access key ID |
+| `Photos__S3__SecretKey` | the token's secret access key |
+
+Other S3-compatible services work too (set `Photos__S3__Region` if they need a region other than `auto`). On a host with a lasting disk you can skip this and mount a volume at `/data` instead; photos are saved in `/data/photos`.
+
+**3. The other settings.**
+
+| Setting | Value |
+|---|---|
+| `Jwt__Key` | A long random secret, 32+ characters. Generate one once and keep it (changing it logs everyone out) |
+| `Proxy__TrustForwardedHeaders` | `true`, since the host's proxy sits in front of the container |
+| `Cors__Origins` | Leave empty. Only needed if the web app is hosted at a different address from the API |
+
+Never commit these to git. Put them in the host's settings or secrets screen.
+
+**4. After it's up.** Open the address the host gives you and sign up; whoever signs up first owns that company. If the host offers a health check setting, point it at `/api/health`. GitHub's checks build and test this same container image on every pull request (the "docker" check), so a green check means it starts and passes the end-to-end tests.
 
 ## Status
 
-Early. Nothing is production ready. Milestone 1 is feature complete; next is hosting it online so a real job can use it.
+Early. Milestone 1 is feature complete and ready to host; next is putting it online so a real job can use it.

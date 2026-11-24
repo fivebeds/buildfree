@@ -18,6 +18,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>();
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<Activity> Activities => Set<Activity>();
+    public DbSet<ScheduleItem> ScheduleItems => Set<ScheduleItem>();
+    public DbSet<NonWorkday> NonWorkdays => Set<NonWorkday>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -31,6 +33,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<Project>().Property(p => p.ManagerIds).HasDefaultValueSql("'{}'");
         b.Entity<Activity>().HasIndex(a => new { a.AccountId, a.CreatedAt });
         b.Entity<Activity>().HasIndex(a => new { a.AccountId, a.ProjectId, a.CreatedAt });
+        b.Entity<Account>().Property(a => a.WorkDays).HasDefaultValue(WorkWeek.MondayToFriday);
+
+        // Schedule items go with their job: deleting the job deletes them.
+        b.Entity<ScheduleItem>().HasIndex(i => new { i.AccountId, i.StartDate });
+        b.Entity<ScheduleItem>().HasIndex(i => new { i.AccountId, i.ProjectId });
+        b.Entity<ScheduleItem>().HasOne<Project>().WithMany().HasForeignKey(i => i.ProjectId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<ScheduleItem>().Property(i => i.AssigneeIds).HasDefaultValueSql("'{}'");
+        b.Entity<NonWorkday>().HasIndex(d => new { d.AccountId, d.Date }).IsUnique();
         b.Entity<DailyLog>().HasIndex(l => new { l.AccountId, l.ProjectId });
         b.Entity<TodoItem>().HasIndex(t => new { t.AccountId, t.ProjectId });
         b.Entity<LogPhoto>().HasIndex(p => new { p.AccountId, p.ProjectId });

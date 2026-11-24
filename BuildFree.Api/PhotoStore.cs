@@ -1,9 +1,14 @@
+using System.Net;
+using Amazon.Runtime;
+using Amazon.S3;
+using Amazon.S3.Model;
+
 namespace BuildFree.Api;
 
 // Where photo files live. The database only keeps details about each photo
 // (who, when, which log); the image itself is saved through this interface.
-// DiskPhotoStore is used for now. A Cloudflare R2 (S3-compatible) version can
-// be added later without changing any endpoint.
+// DiskPhotoStore keeps them in a folder; S3PhotoStore keeps them in
+// S3-compatible storage such as Cloudflare R2. Photos:Storage picks one.
 public interface IPhotoStore
 {
     Task SaveAsync(string key, Stream content, CancellationToken ct = default);
@@ -56,4 +61,58 @@ public class DiskPhotoStore : IPhotoStore
         if (File.Exists(path)) File.Delete(path);
         return Task.CompletedTask;
     }
+}
+
+// Saves photos in S3-compatible storage such as Cloudflare R2, so they survive
+// restarts and redeploys on hosts whose disks are wiped. Turned on with
+// Photos:Storage = S3 plus the Photos:S3 settings (see the README).
+public class S3PhotoStore : IPhotoStore
+{
+    private readonly IAmazonS3 _s3;
+    private readonly string _bucket;
+    private readonly bool _https;
+
+    public S3PhotoStore(string serviceUrl, string bucket, string accessKey, string secretKey, string region)
+    {
+        _bucket = bucket;
+        _https = serviceUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        _s3 = new AmazonS3Client(new BasicAWSCredentials(accessKey, secretKey), new AmazonS3Config
+        {
+            ServiceURL = serviceUrl,
+            AuthenticationRegion = region,
+            ForcePathStyle = true,
+            // R2 doesn't accept the extra checksums newer SDKs add to every request.
+            RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,
+            ResponseChecksumValidation = ResponseChecksumValidation.WHEN_REQUIRED
+        });
+    }
+
+    public async Task SaveAsync(string key, Stream content, CancellationToken ct = default)
+    {
+        await _s3.PutObjectAsync(new PutObjectRequest
+        {
+            BucketName = _bucket,
+            Key = key,
+            InputStream = content,
+            AutoCloseStream = false,
+            // R2 needs this; it's only allowed over https.
+            DisablePayloadSigning = _https
+        }, ct);
+    }
+
+    public async Task<Stream?> OpenAsync(string key, CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _s3.GetObjectAsync(_bucket, key, ct);
+            return response.ResponseStream;
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    public async Task DeleteAsync(string key, CancellationToken ct = default) =>
+        await _s3.DeleteObjectAsync(_bucket, key, ct);
 }

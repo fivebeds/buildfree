@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+**/photo-uploads/
+**/appsettings.Development.json
+.git/
+.github/
+.vs/
+.vscode/
+.env
+devlog/
+tests/

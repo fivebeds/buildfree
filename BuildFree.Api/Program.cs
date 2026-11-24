@@ -3,9 +3,11 @@ using System.Net.Mail;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.RateLimiting;
 using BuildFree.Api;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 
@@ -32,7 +34,8 @@ builder.Services
             ValidateIssuer = false,
             ValidateAudience = false,
             ValidateIssuerSigningKey = true,
-            IssuerSigningKey = new SymmetricSecurityKey(keyBytes)
+            IssuerSigningKey = new SymmetricSecurityKey(keyBytes),
+            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 }
         };
     });
 builder.Services.AddAuthorization();
@@ -44,9 +47,35 @@ if (string.IsNullOrWhiteSpace(photosPath))
     photosPath = Path.Combine(builder.Environment.ContentRootPath, "photo-uploads");
 builder.Services.AddSingleton<IPhotoStore>(new DiskPhotoStore(photosPath));
 
-// Lets a frontend on another port call the API while developing.
+// Which websites may call the API from a browser. Set Cors:Origins (or the
+// Cors__Origins environment variable) to the web app's address, for example
+// "https://app.buildfree.org"; separate several with commas. In development
+// with nothing set, any site may call it, so web/index.html works from disk.
+var corsOrigins = (builder.Configuration["Cors:Origins"] ?? "")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+var corsAnyOrigin = corsOrigins.Length == 0 && builder.Environment.IsDevelopment();
 builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
-    p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+{
+    if (corsAnyOrigin) p.AllowAnyOrigin(); else p.WithOrigins(corsOrigins);
+    p.AllowAnyHeader().AllowAnyMethod();
+}));
+
+// Limits how often one network can try to log in, sign up, use invite or reset
+// links, or change a password: RateLimits:AuthPerMinute tries a minute (60 by
+// default). Wrong passwords are also limited per email; see LoginGuard.
+var authPerMinute = builder.Configuration.GetValue("RateLimits:AuthPerMinute", 60);
+builder.Services.AddRateLimiter(o =>
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.AddPolicy("auth", ctx => RateLimitPartition.GetFixedWindowLimiter(
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = authPerMinute, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+    o.OnRejected = async (rejected, cancel) =>
+    {
+        rejected.HttpContext.Response.Headers.RetryAfter = "60";
+        await rejected.HttpContext.Response.WriteAsJsonAsync(new { error = "Too many tries. Wait a minute and try again." }, cancel);
+    };
+});
 
 // Requests the API can't read (broken JSON, a word where a number goes) are
 // turned into a clear 400 by the error handler below instead of an empty one.
@@ -54,8 +83,23 @@ builder.Services.Configure<RouteHandlerOptions>(o => o.ThrowOnBadRequest = true)
 
 var app = builder.Build();
 
+// Basic browser protections on every response: don't guess file types, don't
+// show the API inside another site's frame, and don't leak addresses.
+app.Use(async (ctx, next) =>
+{
+    ctx.Response.OnStarting(() =>
+    {
+        var headers = ctx.Response.Headers;
+        headers.XContentTypeOptions = "nosniff";
+        headers.XFrameOptions = "DENY";
+        headers["Referrer-Policy"] = "no-referrer";
+        return Task.CompletedTask;
+    });
+    await next();
+});
+
 // Unexpected errors come back as a short JSON message the web app can show;
-// the full details go to the log. The CORS header is added here too, because
+// the full details go to the log. The CORS header is added back here, because
 // the error handler clears the response and the browser would otherwise hide
 // the message.
 app.UseExceptionHandler(errors => errors.Run(async ctx =>
@@ -67,7 +111,9 @@ app.UseExceptionHandler(errors => errors.Run(async ctx =>
             : "The request couldn't be read. Check the fields and try again.")
         : (StatusCodes.Status500InternalServerError, "Something went wrong on our side. Try again, and if it keeps happening, let us know.");
     ctx.Response.StatusCode = status;
-    ctx.Response.Headers.AccessControlAllowOrigin = "*";
+    var origin = ctx.Request.Headers.Origin.ToString();
+    if (corsAnyOrigin) ctx.Response.Headers.AccessControlAllowOrigin = "*";
+    else if (corsOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase)) ctx.Response.Headers.AccessControlAllowOrigin = origin;
     await ctx.Response.WriteAsJsonAsync(new { error = message });
 }));
 
@@ -82,11 +128,13 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseCors();
+app.UseRateLimiter();
 app.UseAuthentication();
 
 // Every signed-in request loads the current user from the database, so a
 // removed team member is locked out right away and role changes apply
-// immediately, even though their login token is still valid.
+// immediately, even though their login token is still valid. A token from
+// before the person's last password change is refused too.
 app.Use(async (ctx, next) =>
 {
     if (ctx.User.Identity?.IsAuthenticated == true)
@@ -95,7 +143,7 @@ app.Use(async (ctx, next) =>
         var user = Guid.TryParse(ctx.User.FindFirstValue("userId"), out var uid)
             ? await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid)
             : null;
-        if (user is null)
+        if (user is null || ctx.User.FindFirstValue("pwd") != Passwords.Stamp(user.PasswordHash))
         {
             ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return;
@@ -122,7 +170,8 @@ string MakeToken(User u)
         {
             new Claim("userId", u.Id.ToString()),
             new Claim("accountId", u.AccountId.ToString()),
-            new Claim("name", u.Name)
+            new Claim("name", u.Name),
+            new Claim("pwd", Passwords.Stamp(u.PasswordHash))
         },
         expires: DateTime.UtcNow.AddDays(7),
         signingCredentials: creds);
@@ -130,6 +179,19 @@ string MakeToken(User u)
 }
 
 Guid AccountId(ClaimsPrincipal p) => Guid.Parse(p.FindFirstValue("accountId")!);
+
+// Checked when an email isn't registered, so a login takes the same time
+// either way and doesn't reveal which emails have accounts.
+var dummyHash = BCrypt.Net.BCrypt.HashPassword(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));
+
+// The user a password reset code is for, if the code is genuine, unexpired and unused.
+async Task<User?> ResetUser(AppDbContext db, string? code)
+{
+    if (ResetCodes.UserId(code) is not Guid uid) return null;
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == uid);
+    return user is not null && ResetCodes.IsFor(keyBytes, code!, user) ? user : null;
+}
+const string ResetLinkBroken = "This reset link is invalid, expired or already used. Ask your company's owner for a new one.";
 
 // ---------- Team roles ----------
 
@@ -241,9 +303,7 @@ app.MapPost("/api/auth/signup", async (SignupRequest r, AppDbContext db) =>
     if (company is null || name is null) return Bad("Company name and your name are required.");
     if (TooLong(company, 200) || TooLong(name, 200)) return Bad("Name is too long.");
     if (!LooksLikeEmail(email)) return Bad("Enter a valid email address.");
-    if (r.Password is null || r.Password.Length < 8)
-        return Bad("Password must be at least 8 characters.");
-    if (r.Password.Length > 200) return Bad("Password is too long.");
+    if (Passwords.Problem(r.Password) is string problem) return Bad(problem);
     if (await db.Users.AnyAsync(u => u.Email == email))
         return Results.Conflict(new { error = "That email is already registered." });
 
@@ -259,17 +319,25 @@ app.MapPost("/api/auth/signup", async (SignupRequest r, AppDbContext db) =>
     db.Users.Add(user);
     await db.SaveChangesAsync();
     return Results.Ok(new { token = MakeToken(user) });
-});
+}).RequireRateLimiting("auth");
 
 app.MapPost("/api/auth/login", async (LoginRequest r, AppDbContext db) =>
 {
     var email = Clean(r.Email)?.ToLowerInvariant();
     if (email is null || string.IsNullOrEmpty(r.Password)) return Results.Unauthorized();
+    if (LoginGuard.MinutesLocked(email) is int minutes)
+        return Results.Json(new { error = $"Too many wrong passwords for this email. Try again in {minutes} minute{(minutes == 1 ? "" : "s")}, or ask your company's owner for a password reset link." },
+            statusCode: StatusCodes.Status429TooManyRequests);
     var user = await db.Users.FirstOrDefaultAsync(u => u.Email == email);
-    if (user is null || !BCrypt.Net.BCrypt.Verify(r.Password, user.PasswordHash))
+    var correct = BCrypt.Net.BCrypt.Verify(r.Password, user?.PasswordHash ?? dummyHash);
+    if (user is null || !correct)
+    {
+        LoginGuard.Failed(email);
         return Results.Unauthorized();
+    }
+    LoginGuard.Clear(email);
     return Results.Ok(new { token = MakeToken(user) });
-});
+}).RequireRateLimiting("auth");
 
 // ---------- Clients ----------
 
@@ -756,6 +824,19 @@ team.MapPut("/{id:guid}/role", async (Guid id, RoleRequest r, ClaimsPrincipal me
     return Results.Ok(MemberView(user));
 }).AddEndpointFilter(OwnerOnly);
 
+// Makes a link the person can use to set a new password, for when they forget
+// it. BuildFree doesn't send email yet, so the owner texts or emails the link.
+// It works once and expires after 24 hours.
+team.MapPost("/{id:guid}/reset-link", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
+{
+    var accountId = AccountId(me);
+    if (id == Me(ctx).Id) return Bad("To change your own password, use Change password on the Team page.");
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id && u.AccountId == accountId);
+    if (user is null) return Results.NotFound();
+    var expiresAt = DateTime.UtcNow.Add(ResetCodes.Lifetime);
+    return Results.Ok(new { code = ResetCodes.Make(keyBytes, user, expiresAt), user.Name, user.Email, expiresAt });
+}).AddEndpointFilter(OwnerOnly);
+
 // Removing someone locks them out right away. Their daily logs and photos stay.
 team.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
@@ -776,7 +857,7 @@ app.MapGet("/api/invites/{code}", async (string code, AppDbContext db) =>
     if (invite is null) return Results.NotFound(new { error = "This invite link is invalid or has expired. Ask for a new one." });
     var company = await db.Accounts.Where(a => a.Id == invite.AccountId).Select(a => a.Name).FirstOrDefaultAsync();
     return Results.Ok(new { company, invite.Name, invite.Email, invite.Role });
-});
+}).RequireRateLimiting("auth");
 
 // Accepting an invite creates the person's login in the inviting company.
 app.MapPost("/api/auth/accept-invite", async (AcceptInviteRequest r, AppDbContext db) =>
@@ -787,8 +868,7 @@ app.MapPost("/api/auth/accept-invite", async (AcceptInviteRequest r, AppDbContex
     if (invite is null) return Results.NotFound(new { error = "This invite link is invalid or has expired. Ask for a new one." });
     var name = Clean(r.Name) ?? invite.Name;
     if (TooLong(name, 200)) return Bad("Name is too long.");
-    if (r.Password is null || r.Password.Length < 8) return Bad("Password must be at least 8 characters.");
-    if (r.Password.Length > 200) return Bad("Password is too long.");
+    if (Passwords.Problem(r.Password) is string problem) return Bad(problem);
     if (await db.Users.AnyAsync(u => u.Email == invite.Email))
         return Results.Conflict(new { error = "That email is already registered." });
 
@@ -804,7 +884,46 @@ app.MapPost("/api/auth/accept-invite", async (AcceptInviteRequest r, AppDbContex
     db.Invites.Remove(invite);
     await db.SaveChangesAsync();
     return Results.Ok(new { token = MakeToken(user) });
-});
+}).RequireRateLimiting("auth");
+
+// ---------- Passwords ----------
+
+// Changing your password signs out every other device. The response has a new
+// token for this one.
+app.MapPut("/api/me/password", async (PasswordChangeRequest r, HttpContext ctx, AppDbContext db) =>
+{
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == Me(ctx).Id);
+    if (user is null) return Results.Unauthorized();
+    if (string.IsNullOrEmpty(r.CurrentPassword) || !BCrypt.Net.BCrypt.Verify(r.CurrentPassword, user.PasswordHash))
+        return Bad("Your current password isn't right.");
+    if (Passwords.Problem(r.NewPassword) is string problem) return Bad(problem);
+    user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(r.NewPassword);
+    await db.SaveChangesAsync();
+    LoginGuard.Clear(user.Email);
+    return Results.Ok(new { token = MakeToken(user) });
+}).RequireAuthorization().RequireRateLimiting("auth");
+
+// What the reset screen shows before the person picks a new password. No login needed.
+app.MapGet("/api/password-resets/{code}", async (string code, AppDbContext db) =>
+{
+    var user = await ResetUser(db, code);
+    if (user is null) return Results.NotFound(new { error = ResetLinkBroken });
+    var company = await db.Accounts.Where(a => a.Id == user.AccountId).Select(a => a.Name).FirstOrDefaultAsync();
+    return Results.Ok(new { company, user.Name, user.Email });
+}).RequireRateLimiting("auth");
+
+// Sets a new password from a reset link and logs the person in. Every device
+// that was logged in as them is signed out, and the link stops working.
+app.MapPost("/api/auth/reset-password", async (PasswordResetRequest r, AppDbContext db) =>
+{
+    var user = await ResetUser(db, r.Code);
+    if (user is null) return Results.NotFound(new { error = ResetLinkBroken });
+    if (Passwords.Problem(r.Password) is string problem) return Bad(problem);
+    user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(r.Password);
+    await db.SaveChangesAsync();
+    LoginGuard.Clear(user.Email);
+    return Results.Ok(new { token = MakeToken(user) });
+}).RequireRateLimiting("auth");
 
 // ---------- Estimates, change orders and invoices (see Estimates.cs, Invoices.cs) ----------
 

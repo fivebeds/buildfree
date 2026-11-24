@@ -68,6 +68,14 @@ echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C
 printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9' > "$JPG"
 echo "this is not a photo" > "$FAKE"
 
+echo "== Health check and the web app"
+call GET /api/health "" "" 200
+[[ "$(field .status)" == "ok" ]] || { echo "FAIL: health check should say ok: $BODY"; exit 1; }
+PAGE="$(curl -s -w "\n%{http_code}" "$API/")"
+[[ "${PAGE##*$'\n'}" == "200" && "$PAGE" == *"<title>BuildFree</title>"* ]] || { echo "FAIL: the web app isn't served at /"; exit 1; }
+[[ "$(curl -s -o /dev/null -w "%{http_code}" "$API/estimates.js")" == "200" ]] || { echo "FAIL: estimates.js isn't served"; exit 1; }
+PASS=$((PASS + 1)); echo "ok   web app served at /"
+
 echo "== Sign up and log in"
 call POST /api/auth/signup "" "{\"companyName\":\"Alpha Builders\",\"name\":\"Ana\",\"email\":\"alpha$RUN@example.com\",\"password\":\"changeme123\"}" 200
 A="$(field .token)"

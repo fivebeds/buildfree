@@ -36,6 +36,11 @@ namespace BuildFree.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<int>("WorkDays")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(62);
+
                     b.HasKey("Id");
 
                     b.ToTable("Accounts");
@@ -420,6 +425,30 @@ namespace BuildFree.Api.Migrations
                     b.ToTable("Photos");
                 });
 
+            modelBuilder.Entity("BuildFree.Api.NonWorkday", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateOnly>("Date")
+                        .HasColumnType("date");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "Date")
+                        .IsUnique();
+
+                    b.ToTable("NonWorkdays");
+                });
+
             modelBuilder.Entity("BuildFree.Api.Payment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -509,6 +538,54 @@ namespace BuildFree.Api.Migrations
                         .IsUnique();
 
                     b.ToTable("Projects");
+                });
+
+            modelBuilder.Entity("BuildFree.Api.ScheduleItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.PrimitiveCollection<List<Guid>>("AssigneeIds")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid[]")
+                        .HasDefaultValueSql("'{}'");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("Done")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateOnly>("EndDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateOnly>("StartDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("AccountId", "ProjectId");
+
+                    b.HasIndex("AccountId", "StartDate");
+
+                    b.ToTable("ScheduleItems");
                 });
 
             modelBuilder.Entity("BuildFree.Api.TodoItem", b =>
@@ -621,6 +698,15 @@ namespace BuildFree.Api.Migrations
                     b.HasOne("BuildFree.Api.Invoice", null)
                         .WithMany()
                         .HasForeignKey("InvoiceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("BuildFree.Api.ScheduleItem", b =>
+                {
+                    b.HasOne("BuildFree.Api.Project", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

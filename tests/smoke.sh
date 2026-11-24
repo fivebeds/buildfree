@@ -111,9 +111,13 @@ call PUT "/api/clients/$CLIENT" "$A" '{"name":"Maria Lopez-Garcia","email":"mari
 echo "== Jobs"
 call POST /api/projects "$A" "{\"name\":\"Kitchen remodel\",\"address\":\"123 Main St\",\"clientId\":\"$CLIENT\",\"startDate\":\"2026-12-01\"}" 201
 JOB="$(field .id)"
+[[ "$(field .number)" == "1001" && "$(field '.managerIds | length')" == "0" ]] || { echo "FAIL: first job should be number 1001 with no managers: $BODY"; exit 1; }
+call POST /api/projects "$A" '{"name":"Same number","number":1001}' 409
+call POST /api/projects "$A" '{"name":"Bad number","number":0}' 400
 call POST /api/projects "$A" '{"name":""}' 400
 call POST /api/projects "$A" '{"name":"Bad dates","startDate":"2026-12-10","endDate":"2026-12-01"}' 400
 call PUT "/api/projects/$JOB" "$A" "{\"name\":\"Kitchen + pantry remodel\",\"address\":\"123 Main St\",\"clientId\":\"$CLIENT\",\"startDate\":\"2026-12-01\",\"endDate\":\"2027-01-15\"}" 200
+[[ "$(field .number)" == "1001" ]] || { echo "FAIL: editing a job without a number should keep its number: $BODY"; exit 1; }
 [[ "$(field .endDate)" == "2027-01-15" ]] || { echo "FAIL: job edit not saved"; exit 1; }
 call PUT "/api/projects/$JOB/status" "$A" '{"status":1}' 200
 call PUT "/api/projects/$JOB/status" "$A" '{"status":9}' 400
@@ -180,6 +184,18 @@ FID="$(field .id)"
 call POST /api/auth/login "" "{\"email\":\"field$RUN@example.com\",\"password\":\"changeme123\"}" 200
 call GET /api/team "$A" "" 200
 [[ "$(field '.members | length')" == "3" && "$(field '.invites | length')" == "0" ]] || { echo "FAIL: team list wrong"; exit 1; }
+
+echo "== Job numbers and project managers"
+call GET /api/me "$B" "" 200
+BID="$(field .id)"
+JOBEDIT="{\"name\":\"Kitchen + pantry remodel\",\"address\":\"123 Main St\",\"clientId\":\"$CLIENT\",\"startDate\":\"2026-12-01\",\"endDate\":\"2027-01-15\""
+call PUT "/api/projects/$JOB" "$A" "$JOBEDIT,\"number\":5225,\"managerIds\":[\"$AID\",\"$FID\",\"$AID\"]}" 200
+[[ "$(field .number)" == "5225" && "$(echo "$BODY" | jq -r --arg a "$AID" --arg f "$FID" '.managerIds | sort == ([$a, $f] | sort)')" == "true" ]] || { echo "FAIL: job number or managers not saved (duplicates should be dropped): $BODY"; exit 1; }
+call PUT "/api/projects/$JOB" "$A" "$JOBEDIT,\"managerIds\":[\"$BID\"]}" 400
+call PUT "/api/projects/$JOB" "$A" "$JOBEDIT,\"number\":10000000}" 400
+call GET "/api/projects/$JOB" "$A" "" 200
+[[ "$(field .number)" == "5225" && "$(field '.managerIds | length')" == "2" ]] || { echo "FAIL: a refused edit changed the job: $BODY"; exit 1; }
+call PUT "/api/projects/$JOB" "$O" "$JOBEDIT,\"number\":5225}" 200
 
 echo "== Field crew can log work but can't manage jobs"
 call GET /api/projects "$F" "" 200
@@ -367,6 +383,33 @@ call GET "/api/invoices/$INV1" "$A" "" 200
 PAY2="$(field '.payments[0].id')"
 call DELETE "/api/payments/$PAY2" "$B" "" 404
 
+echo "== Recent activity"
+call GET /api/activity "$A" "" 200
+[[ "$(field 'length')" == "30" ]] || { echo "FAIL: activity should return 30 lines by default: $(field length)"; exit 1; }
+[[ "$(field '.[0].text')" == "deleted invoice #2 · Progress 1" && "$(field '.[0].userName')" == "Ana" && "$(field '.[0].jobName')" == "#5225 Kitchen + pantry remodel" ]] || { echo "FAIL: newest activity line wrong: $(field '.[0]')"; exit 1; }
+OLDEST="$(field '.[29].createdAt')"
+FIRSTPAGE="$(field 'map(.id)')"
+call GET "/api/activity?before=$OLDEST&limit=100" "$A" "" 200
+[[ "$(echo "$BODY" | jq -r --argjson first "$FIRSTPAGE" 'length > 0 and all(.[]; .id as $i | $first | index($i) == null)')" == "true" ]] || { echo "FAIL: the older page repeats lines from the first page: $BODY"; exit 1; }
+[[ "$(field 'map(.text) | index("created the job") != null')" == "true" ]] || { echo "FAIL: job creation missing from activity"; exit 1; }
+call GET "/api/activity?limit=100" "$A" "" 200
+for t in "added client Maria Lopez" "changed the status to Active" "added 2 photos to the daily log for Tue, Dec 1" "checked off a to-do · Order cabinets and hardware" \
+         "invited Frank to join as Field" "joined the team" "changed the job number from 1001 to 5225" "created estimate #1 · Kitchen remodel" \
+         "marked estimate #1 approved" "copied estimate #1 to #3" "marked change order #1 approved" "recorded a \$150.00 payment on invoice #1"; do
+  [[ "$(echo "$BODY" | jq -r --arg t "$t" 'map(.text) | index($t) != null')" == "true" ]] || { echo "FAIL: activity is missing: $t"; exit 1; }
+done
+PASS=$((PASS + 1)); echo "ok   activity lists jobs, logs, photos, to-dos, team, estimates and payments"
+call GET "/api/activity?projectId=$JOB&limit=100" "$A" "" 200
+[[ "$(echo "$BODY" | jq -r --arg j "$JOB" 'length > 0 and all(.[]; .projectId == $j)')" == "true" ]] || { echo "FAIL: job activity includes other jobs: $BODY"; exit 1; }
+call GET "/api/activity?userId=$FID&limit=100" "$A" "" 200
+[[ "$(echo "$BODY" | jq -r 'length > 0 and all(.[]; .userName == "Frank R")')" == "true" ]] || { echo "FAIL: activity by person wrong: $BODY"; exit 1; }
+call GET "/api/activity?limit=100" "$F" "" 200
+[[ "$(field 'length > 0 and all(.[]; .officeOnly == false)')" == "true" ]] || { echo "FAIL: field crew can see estimate or invoice activity"; exit 1; }
+call GET /api/activity "$B" "" 200
+[[ "$(field 'length')" == "0" ]] || { echo "FAIL: company B can see company A's activity: $BODY"; exit 1; }
+call GET "/api/activity?before=not-a-date" "$A" "" 400
+call GET /api/activity "" "" 401
+
 echo "== Password reset links"
 call POST "/api/team/$FID/reset-link" "$F" "" 403
 call POST "/api/team/$FID/reset-link" "$O" "" 403
@@ -414,6 +457,8 @@ TINV="$(field '.invites[0].id')"
 call DELETE "/api/team/invites/$TINV" "$A" "" 204
 call POST /api/auth/accept-invite "" "{\"code\":\"$TCODE\",\"password\":\"changeme123\"}" 404
 call DELETE "/api/team/$FID" "$A" "" 204
+call GET "/api/projects/$JOB" "$A" "" 200
+[[ "$(echo "$BODY" | jq -r --arg a "$AID" '.managerIds == [$a]')" == "true" ]] || { echo "FAIL: a removed member should no longer manage jobs: $BODY"; exit 1; }
 call GET /api/projects "$F" "" 401
 call POST /api/auth/login "" "{\"email\":\"field$RUN@example.com\",\"password\":\"changeme123\"}" 401
 call GET "/api/projects/$JOB/logs" "$A" "" 200
@@ -455,6 +500,7 @@ call GET /api/me "$B" "" 200
 echo "== Two people creating at the same moment get different numbers"
 call POST /api/projects "$B" '{"name":"Bravo job"}' 201
 BJOB="$(field .id)"
+[[ "$(field .number)" == "1001" ]] || { echo "FAIL: each company's job numbers should start at 1001: $BODY"; exit 1; }
 : > /tmp/smoke_parallel
 for n in 1 2 3 4 5 6; do
   curl -s -o /dev/null -w "%{http_code}\n" -X POST "$API/api/projects/$BJOB/invoices" -H "Content-Type: application/json" -H "Authorization: Bearer $B" \
@@ -479,6 +525,9 @@ LOG2="$(field .id)"
 upload "/api/logs/$LOG2/photos" "$A" 201 "$PNG"
 PHOTO3="$(field '.[0].id')"
 call POST "/api/projects/$JOB/todos" "$A" '{"title":"Second to-do"}' 201
+call POST /api/projects "$A" '{"name":"Next job"}' 201
+[[ "$(field .number)" == "5226" ]] || { echo "FAIL: the next job number should follow the highest one: $BODY"; exit 1; }
+call DELETE "/api/projects/$(field .id)" "$A" "" 204
 call DELETE "/api/projects/$JOB" "$A" "" 409
 call DELETE "/api/payments/$PAY2" "$A" "" 204
 call PUT "/api/invoices/$INV1/status" "$A" '{"status":0}' 200
@@ -488,6 +537,8 @@ call PUT "/api/estimates/$CO1/status" "$A" '{"status":0}' 200
 call DELETE "/api/projects/$JOB" "$A" "" 204
 call GET "/api/projects/$JOB/logs" "$A" "" 200
 [[ "$(field 'length')" == "0" ]] || { echo "FAIL: logs left behind after job delete"; exit 1; }
+call GET "/api/activity?projectId=$JOB&limit=1" "$A" "" 200
+[[ "$(field '.[0].text')" == "deleted the job" && "$(field '.[0].jobName')" == "#5225 Kitchen + pantry remodel" ]] || { echo "FAIL: deleted job should stay in the activity with its name: $BODY"; exit 1; }
 call GET /api/todos "$A" "" 200
 [[ "$(field 'length')" == "0" ]] || { echo "FAIL: to-dos left behind after job delete"; exit 1; }
 getfile "/api/photos/$PHOTO3" "$A" 404

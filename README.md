@@ -55,9 +55,10 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | POST | `/api/auth/login` | Log in, returns a token |
 | GET, POST | `/api/clients` | List or add clients |
 | PUT, DELETE | `/api/clients/{id}` | Edit or delete a client (their jobs are kept) |
-| GET, POST | `/api/projects` | List or add jobs |
+| GET, POST | `/api/projects` | List or add jobs. Each job has a `number` (per company, starting at 1001; leave it out for the next one) and `managerIds` (its project managers) |
 | GET, PUT, DELETE | `/api/projects/{id}` | Get, edit or delete a job. Deleting removes its logs, photos, to-dos and drafts; a job with approved or sent documents can't be deleted |
 | PUT | `/api/projects/{id}/status` | Set status: 0 Planning, 1 Active, 2 On hold, 3 Complete |
+| GET | `/api/activity` | Recent activity, newest first: who did what on which job. Optional `projectId`, `userId`, `limit` (up to 100) and `before` (a `createdAt` from the last line, for older lines). Field crew don't see estimate, invoice or payment lines |
 | GET, POST | `/api/projects/{id}/logs` | List or add daily logs for a job |
 | PUT, DELETE | `/api/logs/{id}` | Edit or delete a daily log (deleting removes its photos) |
 | GET, POST | `/api/logs/{id}/photos` | List a log's photos, or upload photos (form upload, files in a field named `photos`, optional `caption`) |

@@ -17,6 +17,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<InvoiceLine> InvoiceLines => Set<InvoiceLine>();
     public DbSet<Payment> Payments => Set<Payment>();
+    public DbSet<Activity> Activities => Set<Activity>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -26,6 +27,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<Invite>().HasIndex(i => i.AccountId);
         b.Entity<Client>().HasIndex(c => c.AccountId);
         b.Entity<Project>().HasIndex(p => p.AccountId);
+        b.Entity<Project>().HasIndex(p => new { p.AccountId, p.Number }).IsUnique();
+        b.Entity<Project>().Property(p => p.ManagerIds).HasDefaultValueSql("'{}'");
+        b.Entity<Activity>().HasIndex(a => new { a.AccountId, a.CreatedAt });
+        b.Entity<Activity>().HasIndex(a => new { a.AccountId, a.ProjectId, a.CreatedAt });
         b.Entity<DailyLog>().HasIndex(l => new { l.AccountId, l.ProjectId });
         b.Entity<TodoItem>().HasIndex(t => new { t.AccountId, t.ProjectId });
         b.Entity<LogPhoto>().HasIndex(p => new { p.AccountId, p.ProjectId });

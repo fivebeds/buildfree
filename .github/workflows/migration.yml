@@ -1,0 +1,99 @@
+# Creates a database migration without needing .NET on your computer.
+#
+# On GitHub: Actions tab > "Create database migration" > Run workflow. Pick the
+# branch that has your model changes, type a name (for example InitialCreate or
+# AddInvoices), and run it. It generates the migration, checks that the API
+# starts with it on a fresh PostgreSQL database and that tests/smoke.sh passes,
+# then pushes the files to a new branch and opens a pull request.
+name: Create database migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Migration name, letters and numbers only (for example InitialCreate)"
+        required: true
+        default: InitialCreate
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  migration:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: buildfree
+          POSTGRES_PASSWORD: buildfree
+          POSTGRES_DB: buildfree
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U buildfree"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MIGRATION_NAME: ${{ inputs.name }}
+      ASPNETCORE_ENVIRONMENT: Development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Check the name
+        run: |
+          if ! [[ "$MIGRATION_NAME" =~ ^[A-Za-z][A-Za-z0-9]{0,79}$ ]]; then
+            echo "Use letters and numbers only, starting with a letter (for example AddInvoices)."; exit 1
+          fi
+
+      - name: Create the migration
+        run: |
+          dotnet tool install --global dotnet-ef --version "10.*"
+          dotnet ef migrations add "$MIGRATION_NAME" --project BuildFree.Api --output-dir Migrations
+          git status --short
+
+      - name: Build
+        run: dotnet build BuildFree.Api --configuration Release
+
+      - name: Start the API (this applies the migration to an empty database)
+        env:
+          ASPNETCORE_URLS: http://localhost:5000
+        run: |
+          nohup dotnet run --project BuildFree.Api --configuration Release --no-build --no-launch-profile > api.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -s -o /dev/null http://localhost:5000/api/projects; then echo "API is up"; exit 0; fi
+            sleep 1
+          done
+          echo "API did not start:"; cat api.log; exit 1
+
+      - name: Run end-to-end checks
+        run: bash tests/smoke.sh
+
+      - name: Push a branch and open a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="migration/${MIGRATION_NAME}-${GITHUB_RUN_NUMBER}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add BuildFree.Api/Migrations
+          git commit -m "Add database migration ${MIGRATION_NAME}"
+          git push origin "$branch"
+          gh pr create --base "$GITHUB_REF_NAME" --head "$branch" \
+            --title "Database migration: ${MIGRATION_NAME}" \
+            --body "Created by the \"Create database migration\" workflow. The API started with this migration on an empty database and tests/smoke.sh passed in that run." \
+            || echo "Couldn't open the pull request automatically (Settings > Actions > General > 'Allow GitHub Actions to create and approve pull requests'). Open one from the branch $branch."
+
+      - name: Show API log if something failed
+        if: failure()
+        run: cat api.log || true

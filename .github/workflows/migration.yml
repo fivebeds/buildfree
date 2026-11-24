@@ -58,8 +58,8 @@ jobs:
       - name: Create the migration
         run: |
           dotnet tool install --global dotnet-ef --version "10.*"
+          dotnet restore BuildFree.Api
           dotnet ef migrations add "$MIGRATION_NAME" --project BuildFree.Api --output-dir Migrations
-          git status --short
 
       - name: Build
         run: dotnet build BuildFree.Api --configuration Release

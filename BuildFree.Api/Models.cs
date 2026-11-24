@@ -9,6 +9,10 @@ public class Account
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "";
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    // The days of the week the company works, one bit per day: Sunday is bit
+    // 0, Monday bit 1 ... Saturday bit 6. Monday to Friday by default.
+    public int WorkDays { get; set; } = WorkWeek.MondayToFriday;
 }
 
 // What a team member is allowed to do. Owner: everything, including the team.
@@ -199,6 +203,32 @@ public class Payment
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
+// Something on a job's schedule: framing, an inspection, a delivery. It runs
+// from StartDate to EndDate (the same day for one-day items) and can be
+// assigned to team members. Anyone can check it off; the office plans it.
+public class ScheduleItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccountId { get; set; }
+    public Guid ProjectId { get; set; }
+    public string Title { get; set; } = "";
+    public DateOnly StartDate { get; set; }
+    public DateOnly EndDate { get; set; }
+    public List<Guid> AssigneeIds { get; set; } = new();
+    public bool Done { get; set; }
+    public string? Notes { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+// A day the company doesn't work on top of its weekly days off, like a holiday.
+public class NonWorkday
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccountId { get; set; }
+    public DateOnly Date { get; set; }
+    public string Name { get; set; } = "";
+}
+
 // One line in the recent activity feed: who did what, on which job, and when.
 // The job's name is kept too, so the line still reads right after the job is
 // deleted. OfficeOnly lines (estimates, invoices, payments) are hidden from
@@ -238,3 +268,7 @@ public record EstimateRequest(string? Title, string? Notes, decimal? MarkupPerce
 public record InvoiceLineRequest(string? Description, decimal Amount);
 public record InvoiceRequest(string? Title, DateOnly? IssueDate, DateOnly? DueDate, string? Notes, List<InvoiceLineRequest>? Lines);
 public record PaymentRequest(decimal Amount, DateOnly? Date, int Method, string? Reference);
+public record ScheduleRequest(string? Title, DateOnly? StartDate, DateOnly? EndDate, List<Guid>? AssigneeIds, string? Notes);
+// WorkDays: 0 = Sunday ... 6 = Saturday, like JavaScript's getDay().
+public record WorkCalendarRequest(List<int>? WorkDays, List<NonWorkdayRequest>? NonWorkdays);
+public record NonWorkdayRequest(DateOnly? Date, string? Name);

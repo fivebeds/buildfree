@@ -14,7 +14,7 @@ Sign up and log in, create clients and projects, and post daily logs with job ph
 
 ## Later
 
-Estimate, change order and invoice approval by the homeowner, online payments, a simple schedule, a homeowner portal, and QuickBooks export.
+Estimate, change order and invoice approval by the homeowner, online payments, a time clock, a homeowner portal, and QuickBooks export.
 
 ## Stack
 
@@ -59,6 +59,11 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | GET, PUT, DELETE | `/api/projects/{id}` | Get, edit or delete a job. Deleting removes its logs, photos, to-dos and drafts; a job with approved or sent documents can't be deleted |
 | PUT | `/api/projects/{id}/status` | Set status: 0 Planning, 1 Active, 2 On hold, 3 Complete |
 | GET | `/api/activity` | Recent activity, newest first: who did what on which job. Optional `projectId`, `userId`, `limit` (up to 100) and `before` (a `createdAt` from the last line, for older lines). Field crew don't see estimate, invoice or payment lines |
+| GET, POST | `/api/projects/{id}/schedule` | A job's schedule in date order, or add an item (owner and office): title, start and end date, assignees, notes |
+| PUT, DELETE | `/api/schedule/{id}` | Owner and office only. Edit or delete a schedule item |
+| POST | `/api/schedule/{id}/toggle` | Mark a schedule item done or not done (anyone on the team) |
+| GET | `/api/schedule` | The agenda across all jobs: items between `from` and `to` (up to 62 days; this week Monday to Sunday by default), optionally for one `userId`, plus the workdays and days off in that range |
+| GET, PUT | `/api/work-calendar` | The weekdays the company works (0 Sunday to 6 Saturday) and its days off. Changing it is owner and office only; it replaces the whole list |
 | GET, POST | `/api/projects/{id}/logs` | List or add daily logs for a job |
 | PUT, DELETE | `/api/logs/{id}` | Edit or delete a daily log (deleting removes its photos) |
 | GET, POST | `/api/logs/{id}/photos` | List a log's photos, or upload photos (form upload, files in a field named `photos`, optional `caption`) |
@@ -121,6 +126,14 @@ Each job can have invoices, numbered per company (#1, #2...). An invoice is a li
 Payments are recorded against an invoice and can't be more than what's still owed. An invoice shows as draft, sent, partial, paid, overdue (sent, not fully paid and past its due date, in Pacific time) or void. Recording a payment on a draft marks it sent. Once an invoice has payments it can't be edited, voided or deleted; delete the payment first if it was entered by mistake.
 
 The job's billing summary compares the revised contract (approved estimate plus approved change orders) with what's been invoiced and paid. Drafts and void invoices don't count as invoiced. The printed invoice shows the lines, payments received and the balance due. Field crew can't see invoices.
+
+## Schedule
+
+Each job has a schedule: the work, inspections and deliveries, each with a start and end date (one day if the end is left blank), the people assigned and notes. The owner and office plan it; anyone can check an item off. An item that isn't done after its end date shows as late, and items running more than a day show how many workdays they take.
+
+The Today page shows the week's agenda across every job, Monday to Sunday, with arrows for other weeks and a switch for only what's assigned to you. Days off are marked, and items running through a day off aren't repeated on it.
+
+The work calendar on the Team page sets which weekdays the company works (Monday to Friday by default) and its holidays and other days off. Deleting a job deletes its schedule, and removing someone from the team takes them off their schedule items.
 
 ## Team members
 

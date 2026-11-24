@@ -410,6 +410,63 @@ call GET /api/activity "$B" "" 200
 call GET "/api/activity?before=not-a-date" "$A" "" 400
 call GET /api/activity "" "" 401
 
+echo "== Schedule"
+call POST "/api/projects/$JOB/schedule" "$A" "{\"title\":\"Framing\",\"startDate\":\"2026-12-07\",\"endDate\":\"2026-12-11\",\"assigneeIds\":[\"$FID\",\"$FID\"],\"notes\":\"Walls and roof\"}" 201
+SCH="$(field .id)"
+[[ "$(field '.assigneeIds | length')" == "1" && "$(field .done)" == "false" && "$(field .notes)" == "Walls and roof" ]] || { echo "FAIL: schedule item wrong: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/schedule" "$O" '{"title":"Rough inspection","startDate":"2026-12-14"}' 201
+SCH2="$(field .id)"
+[[ "$(field .endDate)" == "2026-12-14" ]] || { echo "FAIL: a one-day item should end the day it starts: $BODY"; exit 1; }
+call POST "/api/projects/$JOB/schedule" "$A" '{"title":"","startDate":"2026-12-14"}' 400
+call POST "/api/projects/$JOB/schedule" "$A" '{"title":"No date"}' 400
+call POST "/api/projects/$JOB/schedule" "$A" '{"title":"Backwards","startDate":"2026-12-14","endDate":"2026-12-10"}' 400
+call POST "/api/projects/$JOB/schedule" "$A" "{\"title\":\"Wrong team\",\"startDate\":\"2026-12-14\",\"assigneeIds\":[\"$BID\"]}" 400
+call POST "/api/projects/$JOB/schedule" "$F" '{"title":"Field plan","startDate":"2026-12-14"}' 403
+call GET "/api/projects/$JOB/schedule" "$F" "" 200
+[[ "$(field 'length')" == "2" && "$(field '.[0].title')" == "Framing" ]] || { echo "FAIL: job schedule wrong: $BODY"; exit 1; }
+call PUT "/api/schedule/$SCH" "$A" "{\"title\":\"Framing\",\"startDate\":\"2026-12-08\",\"endDate\":\"2026-12-12\",\"assigneeIds\":[\"$FID\"]}" 200
+[[ "$(field .startDate)" == "2026-12-08" && "$(field .notes)" == "null" ]] || { echo "FAIL: schedule edit not saved: $BODY"; exit 1; }
+call PUT "/api/schedule/$SCH" "$F" '{"title":"Changed","startDate":"2026-12-08"}' 403
+call DELETE "/api/schedule/$SCH" "$F" "" 403
+call POST "/api/schedule/$SCH/toggle" "$F" "" 200
+[[ "$(field .done)" == "true" ]] || { echo "FAIL: field crew should be able to check off schedule items: $BODY"; exit 1; }
+call GET "/api/schedule?from=2026-12-07&to=2026-12-13" "$A" "" 200
+[[ "$(field '.items | length')" == "1" && "$(field '.items[0].title')" == "Framing" && "$(field '.workDays == [1,2,3,4,5]')" == "true" ]] || { echo "FAIL: agenda wrong: $BODY"; exit 1; }
+call GET "/api/schedule?from=2026-12-07&to=2026-12-20&userId=$FID" "$A" "" 200
+[[ "$(field '.items | length')" == "1" ]] || { echo "FAIL: agenda for one person wrong: $BODY"; exit 1; }
+call GET "/api/schedule?from=2026-12-07&to=2026-12-20" "$F" "" 200
+[[ "$(field '.items | length')" == "2" ]] || { echo "FAIL: field crew should see the whole schedule: $BODY"; exit 1; }
+call GET /api/schedule "$A" "" 200
+[[ "$(date -d "$(field .from)" +%u)" == "1" && "$(date -d "$(field .to)" +%u)" == "7" ]] || { echo "FAIL: the default agenda should be Monday to Sunday: $BODY"; exit 1; }
+call GET "/api/schedule?from=2026-12-07&to=2027-03-01" "$A" "" 400
+call GET "/api/schedule?from=2026-12-14&to=2026-12-07" "$A" "" 400
+call GET "/api/schedule?from=2026-12-07&to=2026-12-20" "$B" "" 200
+[[ "$(field '.items | length')" == "0" ]] || { echo "FAIL: company B can see company A's schedule"; exit 1; }
+call GET "/api/projects/$JOB/schedule" "$B" "" 404
+call POST "/api/projects/$JOB/schedule" "$B" '{"title":"X","startDate":"2026-12-14"}' 404
+call PUT "/api/schedule/$SCH" "$B" '{"title":"Hacked","startDate":"2026-12-08"}' 404
+call POST "/api/schedule/$SCH/toggle" "$B" "" 404
+call DELETE "/api/schedule/$SCH" "$B" "" 404
+
+echo "== Work calendar"
+call GET /api/work-calendar "$F" "" 200
+[[ "$(field '.workDays == [1,2,3,4,5] and (.nonWorkdays | length) == 0')" == "true" ]] || { echo "FAIL: new companies should work Monday to Friday: $BODY"; exit 1; }
+call PUT /api/work-calendar "$O" '{"workDays":[6,1,2,3,4,5],"nonWorkdays":[{"date":"2026-12-25","name":"Christmas"},{"date":"2027-01-01"}]}' 200
+[[ "$(field '.workDays == [1,2,3,4,5,6] and (.nonWorkdays | length) == 2')" == "true" && "$(field '.nonWorkdays[1].name')" == "Day off" ]] || { echo "FAIL: work calendar not saved: $BODY"; exit 1; }
+call PUT /api/work-calendar "$A" '{"workDays":[]}' 400
+call PUT /api/work-calendar "$A" '{"workDays":[7]}' 400
+call PUT /api/work-calendar "$A" '{"workDays":[1],"nonWorkdays":[{"date":"2026-12-25"},{"date":"2026-12-25"}]}' 400
+call PUT /api/work-calendar "$F" '{"workDays":[1,2,3]}' 403
+call GET "/api/schedule?from=2026-12-21&to=2026-12-27" "$F" "" 200
+[[ "$(field '.nonWorkdays | length')" == "1" && "$(field '.nonWorkdays[0].name')" == "Christmas" && "$(field '.workDays | index(6) != null')" == "true" ]] || { echo "FAIL: agenda should show days off: $BODY"; exit 1; }
+call GET /api/work-calendar "$B" "" 200
+[[ "$(field '.workDays == [1,2,3,4,5] and (.nonWorkdays | length) == 0')" == "true" ]] || { echo "FAIL: company B sees company A's work calendar: $BODY"; exit 1; }
+call GET "/api/activity?limit=20" "$A" "" 200
+for t in "scheduled Framing for Mon, Dec 7 to Fri, Dec 11" "moved Framing to Tue, Dec 8 to Sat, Dec 12" "finished Framing" "updated the work calendar"; do
+  [[ "$(echo "$BODY" | jq -r --arg t "$t" 'map(.text) | index($t) != null')" == "true" ]] || { echo "FAIL: activity is missing: $t"; exit 1; }
+done
+PASS=$((PASS + 1)); echo "ok   schedule changes show in the activity"
+
 echo "== Password reset links"
 call POST "/api/team/$FID/reset-link" "$F" "" 403
 call POST "/api/team/$FID/reset-link" "$O" "" 403
@@ -459,6 +516,8 @@ call POST /api/auth/accept-invite "" "{\"code\":\"$TCODE\",\"password\":\"change
 call DELETE "/api/team/$FID" "$A" "" 204
 call GET "/api/projects/$JOB" "$A" "" 200
 [[ "$(echo "$BODY" | jq -r --arg a "$AID" '.managerIds == [$a]')" == "true" ]] || { echo "FAIL: a removed member should no longer manage jobs: $BODY"; exit 1; }
+call GET "/api/projects/$JOB/schedule" "$A" "" 200
+[[ "$(echo "$BODY" | jq -r --arg f "$FID" '[.[].assigneeIds[]] | index($f) == null')" == "true" ]] || { echo "FAIL: a removed member is still assigned on the schedule: $BODY"; exit 1; }
 call GET /api/projects "$F" "" 401
 call POST /api/auth/login "" "{\"email\":\"field$RUN@example.com\",\"password\":\"changeme123\"}" 401
 call GET "/api/projects/$JOB/logs" "$A" "" 200
@@ -525,6 +584,9 @@ LOG2="$(field .id)"
 upload "/api/logs/$LOG2/photos" "$A" 201 "$PNG"
 PHOTO3="$(field '.[0].id')"
 call POST "/api/projects/$JOB/todos" "$A" '{"title":"Second to-do"}' 201
+call DELETE "/api/schedule/$SCH2" "$A" "" 204
+call GET "/api/projects/$JOB/schedule" "$A" "" 200
+[[ "$(field 'length')" == "1" ]] || { echo "FAIL: schedule item not deleted: $BODY"; exit 1; }
 call POST /api/projects "$A" '{"name":"Next job"}' 201
 [[ "$(field .number)" == "5226" ]] || { echo "FAIL: the next job number should follow the highest one: $BODY"; exit 1; }
 call DELETE "/api/projects/$(field .id)" "$A" "" 204
@@ -541,6 +603,8 @@ call GET "/api/activity?projectId=$JOB&limit=1" "$A" "" 200
 [[ "$(field '.[0].text')" == "deleted the job" && "$(field '.[0].jobName')" == "#5225 Kitchen + pantry remodel" ]] || { echo "FAIL: deleted job should stay in the activity with its name: $BODY"; exit 1; }
 call GET /api/todos "$A" "" 200
 [[ "$(field 'length')" == "0" ]] || { echo "FAIL: to-dos left behind after job delete"; exit 1; }
+call GET "/api/schedule?from=2026-12-07&to=2026-12-20" "$A" "" 200
+[[ "$(field '.items | length')" == "0" ]] || { echo "FAIL: schedule left behind after job delete: $BODY"; exit 1; }
 getfile "/api/photos/$PHOTO3" "$A" 404
 call GET "/api/estimates/$ESTCOPY" "$A" "" 404
 call GET "/api/estimates/$CO1" "$A" "" 404

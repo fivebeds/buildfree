@@ -123,6 +123,41 @@
   .mgrlist label { display: flex; gap: 10px; align-items: center; font-weight: 400; font-size: 14px; }
   .mgrlist input { width: auto; margin: 0; }
   .home .group:first-child { margin-top: 0; }
+  .agenda { display: grid; }
+  .day { padding: 10px 0; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+  .day:first-child { border-top: 0; padding-top: 0; }
+  .dayhead { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }
+  .dayhead b { font-weight: 500; }
+  .day.off .dayhead b { color: var(--muted); font-weight: 400; }
+  .day.today .dayhead b { color: var(--text); font-weight: 600; }
+  .pill { font-size: 11px; font-weight: 500; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line-strong); }
+  .day.off .tag { color: var(--muted); font-size: 12px; }
+  .agitem { display: grid; grid-template-columns: 3px 1fr; gap: 10px; text-align: left; background: none; border: 0; padding: 2px 0; cursor: pointer; }
+  .agitem::before { content: ""; border-radius: 2px; background: var(--b-active); }
+  .agitem.done::before { background: var(--b-done); }
+  .agitem.done .t { text-decoration: line-through; color: var(--muted); }
+  .agitem:hover .t { text-decoration: underline; text-underline-offset: 3px; }
+  .agitem .t { font-size: 14px; }
+  .agitem .sub { font-size: 12px; }
+  .weeknav { display: flex; gap: 4px; align-items: center; }
+  .weeknav .btn { padding: 3px 9px; font-size: 13px; }
+  .minebox { display: flex; gap: 6px; align-items: center; font-weight: 400; font-size: 13px; color: var(--muted); }
+  .minebox input { width: auto; margin: 0; }
+  .schrow { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; border-top: 1px solid var(--line); padding-top: 10px; }
+  .schrow:first-of-type { border-top: 0; padding-top: 0; }
+  .schrow input[type=checkbox] { width: auto; margin: 3px 0 0; }
+  .schrow .t { font-weight: 500; }
+  .schrow.done .t { text-decoration: line-through; color: var(--muted); font-weight: 400; }
+  .schrow .sub { font-size: 13px; }
+  .late { color: var(--err); }
+  .avs { display: inline-flex; gap: 2px; vertical-align: middle; margin-left: 4px; }
+  .avs .av { width: 20px; height: 20px; font-size: 9px; }
+  .wkdays { display: flex; gap: 6px; flex-wrap: wrap; }
+  .wkdays label { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; font-size: 14px; border: 1px solid var(--line-strong); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  .wkdays input { width: auto; margin: 0; }
+  .offrow { display: grid; grid-template-columns: 150px 1fr 28px; gap: 6px; align-items: center; }
+  .offrow input { padding: 7px 8px; }
+  .btn.sm { padding: 4px 10px; font-size: 13px; }
   .pane { padding: 32px; max-width: 1100px; }
   .grid2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; align-items: start; margin-top: 24px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; display: grid; gap: 14px; }
@@ -259,6 +294,7 @@
   let view = "jobs";
   let projects = [], clients = [], todos = [];
   let me = null, team = { members: [], invites: [] };
+  let calendar = { workDays: [1, 2, 3, 4, 5], nonWorkdays: [] };
 
   // Roles, in the same order as the API. Owners manage the team; owners and
   // office staff manage jobs and clients; field crew add daily logs, photos
@@ -309,10 +345,10 @@
     return data;
   }
 
-  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; estimates = []; changeOrders = []; contract = null; estimateOpen = null; invoices = []; billing = null; invoiceOpen = null; clearPhotoCache(); render(); }
+  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; estimates = []; changeOrders = []; contract = null; estimateOpen = null; invoices = []; billing = null; invoiceOpen = null; jobSchedule = []; clearPhotoCache(); render(); }
 
   async function loadData() {
-    [me, team, projects, clients, todos] = await Promise.all([api("/api/me"), api("/api/team"), api("/api/projects"), api("/api/clients"), api("/api/todos")]);
+    [me, team, projects, clients, todos, calendar] = await Promise.all([api("/api/me"), api("/api/team"), api("/api/projects"), api("/api/clients"), api("/api/todos"), api("/api/work-calendar")]);
   }
 
   /* ---------- Log in / sign up ---------- */
@@ -436,13 +472,14 @@
   let estimates = [], changeOrders = [], contract = null;
   let estimateOpen = null; // an estimate or change order id, "new", "new-co", or null
   let invoices = [], billing = null, invoiceOpen = null; // invoiceOpen: an invoice id, "new", or null
+  let jobSchedule = [];
   const todayStr = () => new Date().toLocaleDateString("en-CA");
   const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "";
 
   async function refresh() {
     await loadData();
     const office = selected && canManage();
-    [logs, photos, estimates, changeOrders, contract, invoices, billing] = selected
+    [logs, photos, estimates, changeOrders, contract, invoices, billing, jobSchedule] = selected
       ? await Promise.all([
           api("/api/projects/" + selected + "/logs").catch(() => []),
           api("/api/projects/" + selected + "/photos").catch(() => []),
@@ -450,8 +487,9 @@
           office ? api("/api/projects/" + selected + "/change-orders").catch(() => []) : [],
           office ? api("/api/projects/" + selected + "/contract").catch(() => null) : null,
           office ? api("/api/projects/" + selected + "/invoices").catch(() => []) : [],
-          office ? api("/api/projects/" + selected + "/billing").catch(() => null) : null])
-      : [[], [], [], [], null, [], null];
+          office ? api("/api/projects/" + selected + "/billing").catch(() => null) : null,
+          api("/api/projects/" + selected + "/schedule").catch(() => [])])
+      : [[], [], [], [], null, [], null, []];
     render();
   }
   async function selectJob(id) { selected = id; estimateOpen = null; invoiceOpen = null; await refresh(); }
@@ -554,7 +592,161 @@
           group("Past due", open.filter(t => t.dueDate && t.dueDate < t0), "late"),
           group("Due today", open.filter(t => t.dueDate === t0)),
           group("Upcoming and no date", open.filter(t => !t.dueDate || t.dueDate > t0))),
-        activityPanel({ title: "Recent activity from your team", limit: 15 })));
+        h("div", { class: "stack", style: "gap:20px" },
+          agendaPanel(),
+          activityPanel({ title: "Recent activity from your team", limit: 15 }))));
+  }
+
+  /* ---------- Schedule ---------- */
+  // Dates are kept as "YYYY-MM-DD" text, read in the browser's own time zone.
+  const plusDays = (d, n) => { const t = new Date(d + "T00:00:00"); t.setDate(t.getDate() + n); return t.toLocaleDateString("en-CA"); };
+  const mondayOf = (d) => plusDays(d, -((new Date(d + "T00:00:00").getDay() + 6) % 7));
+  const weekday = (d) => new Date(d + "T00:00:00").getDay();
+  const dayOff = (d, cal = calendar) => {
+    const named = (cal.nonWorkdays || []).find(x => x.date === d);
+    return named ? named.name : cal.workDays.includes(weekday(d)) ? null : "Non-workday";
+  };
+  const shortDate = (d) => new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const whenText = (i) => i.startDate === i.endDate ? fmtDate(i.startDate) : fmtDate(i.startDate) + " – " + fmtDate(i.endDate);
+  const avatars = (ids) => {
+    const names = (ids || []).map(memberName).filter(Boolean);
+    return names.length ? h("span", { class: "avs", title: names.join(", ") }, names.map(avatar)) : null;
+  };
+
+  // The Today page's week: Monday to Sunday, every job, days off marked.
+  let agendaWeek = null;
+  let agendaMine = prefs.get("bf_agenda_mine", "") === "1";
+  function agendaPanel() {
+    agendaWeek = agendaWeek || mondayOf(todayStr());
+    const body = h("div", { class: "agenda" }, h("p", { class: "sub" }, "Loading…"));
+    const title = h("h2", {});
+    const load = async () => {
+      const from = agendaWeek, to = plusDays(from, 6), t0 = todayStr();
+      title.textContent = from === mondayOf(t0) ? "This week" : shortDate(from) + " – " + shortDate(to);
+      const q = new URLSearchParams({ from, to });
+      if (agendaMine && me) q.set("userId", me.id);
+      let data;
+      try { data = await api("/api/schedule?" + q); }
+      catch (ex) { body.replaceChildren(h("p", { class: "err" }, ex.message)); return; }
+      const cal = { workDays: data.workDays, nonWorkdays: data.nonWorkdays };
+      const days = [...Array(7)].map((_, n) => plusDays(from, n));
+      body.replaceChildren(...days.map(d => {
+        const off = dayOff(d, cal);
+        // On a day off, only items that start or end that day show, not ones running through it.
+        const todays = data.items.filter(i => i.startDate <= d && i.endDate >= d && (!off || i.startDate === d || i.endDate === d));
+        return h("div", { class: "day" + (off ? " off" : "") + (d === t0 ? " today" : "") },
+          h("div", { class: "dayhead" }, h("b", {}, fmtDate(d)), d === t0 && h("span", { class: "pill" }, "Today"), off && h("span", { class: "tag" }, off)),
+          todays.map(i => {
+            const job = projects.find(p => p.id === i.projectId);
+            const span = i.startDate === i.endDate || off ? "" : "Day " + workdaysBetween(i.startDate, d, cal) + " of " + workdaysBetween(i.startDate, i.endDate, cal);
+            return h("button", { class: "agitem" + (i.done ? " done" : ""), type: "button", onclick: () => job && selectJob(job.id) },
+              h("div", {}, h("div", { class: "t" }, i.title, avatars(i.assigneeIds)),
+                h("div", { class: "sub" }, [job ? jobLabel(job) : "", span].filter(Boolean).join(" · "))));
+          }));
+      }));
+      if (!data.items.length) body.append(h("p", { class: "sub", style: "margin:8px 0 0" }, agendaMine ? "Nothing assigned to you this week." : "Nothing on the schedule this week."));
+    };
+    const go = (n) => { agendaWeek = n === 0 ? mondayOf(todayStr()) : plusDays(agendaWeek, 7 * n); load(); };
+    load();
+    return h("div", { class: "panel" },
+      h("div", { class: "panelhead" }, title,
+        h("div", { class: "weeknav" },
+          h("button", { class: "btn ghost", type: "button", "aria-label": "Previous week", onclick: () => go(-1) }, "‹"),
+          h("button", { class: "btn ghost", type: "button", onclick: () => go(0) }, "Today"),
+          h("button", { class: "btn ghost", type: "button", "aria-label": "Next week", onclick: () => go(1) }, "›"))),
+      h("label", { class: "minebox" }, h("input", { type: "checkbox", checked: agendaMine ? "" : false, onchange: (e) => {
+        agendaMine = e.target.checked; prefs.set("bf_agenda_mine", agendaMine ? "1" : ""); load();
+      } }), "Only what's assigned to me"),
+      body);
+  }
+  // Workdays from start to end, counting both and skipping days off (at least 1).
+  function workdaysBetween(start, end, cal = calendar) {
+    let n = 0;
+    for (let d = start, i = 0; d <= end && i < 1200; d = plusDays(d, 1), i++) if (!dayOff(d, cal)) n++;
+    return Math.max(n, 1);
+  }
+
+  // A job's schedule on the job page.
+  function schedulePanel(p) {
+    const t0 = todayStr();
+    return h("div", { class: "panel" },
+      h("div", { class: "panelhead" }, h("h2", {}, "Schedule"),
+        canManage() && h("button", { class: "btn ghost sm", type: "button", onclick: () => scheduleDialog(p) }, "Add")),
+      jobSchedule.length ? jobSchedule.map(i => {
+        const late = !i.done && i.endDate < t0;
+        const days = workdaysBetween(i.startDate, i.endDate);
+        return h("div", { class: "schrow" + (i.done ? " done" : "") },
+          h("input", { type: "checkbox", checked: i.done ? "" : false, "aria-label": "Done: " + i.title, onchange: async () => { await api("/api/schedule/" + i.id + "/toggle", "POST"); await refresh(); } }),
+          h("div", {},
+            h("div", { class: "t" }, i.title, avatars(i.assigneeIds)),
+            h("div", { class: "sub" }, whenText(i), i.startDate !== i.endDate ? " · " + days + " workday" + (days === 1 ? "" : "s") : "",
+              late ? h("span", { class: "late" }, " · Late") : null),
+            i.notes ? h("div", { class: "sub", style: "white-space:pre-wrap" }, i.notes) : null),
+          canManage() ? h("div", { class: "tools" },
+            h("button", { class: "link", type: "button", onclick: () => scheduleDialog(p, i) }, "Edit"),
+            h("button", { class: "x", type: "button", title: "Take off the schedule", "aria-label": "Delete " + i.title, onclick: () => confirmDelete("Take “" + i.title + "” off the schedule?", "/api/schedule/" + i.id) }, "×")) : h("span"));
+      }) : h("p", { class: "sub" }, canManage() ? "Nothing scheduled yet. Add the work, inspections and deliveries for this job." : "Nothing scheduled yet."));
+  }
+
+  function scheduleDialog(p, item) {
+    const v = item || {};
+    const picked = v.assigneeIds || [];
+    const people = h("div", { class: "mgrlist" }, team.members.map(m =>
+      h("label", {}, h("input", { type: "checkbox", value: m.id, checked: picked.includes(m.id) ? "" : false }), avatar(m.name), m.name,
+        m.id === me.id ? h("span", { class: "you" }, " (you)") : null)));
+    const notes = h("textarea", { name: "notes", rows: 3, maxlength: 4000, placeholder: "Optional" });
+    notes.value = v.notes || "";
+    dialog(item ? "Edit schedule item" : "Add to the schedule", [
+      h("label", {}, "What", h("input", { name: "title", required: true, maxlength: 200, placeholder: "Framing, rough inspection, cabinet delivery…", value: v.title || "" })),
+      h("div", { class: "inline" },
+        h("label", { style: "flex:1" }, "Start", h("input", { name: "startDate", type: "date", required: true, value: v.startDate || todayStr() })),
+        h("label", { style: "flex:1" }, "End", h("input", { name: "endDate", type: "date", value: v.endDate && v.endDate !== v.startDate ? v.endDate : "" }))),
+      h("p", { class: "sub", style: "margin:-8px 0 0;font-size:13px" }, "Leave the end blank for a one-day item."),
+      h("div", { style: "display:grid;gap:6px" }, h("span", { class: "label" }, "Assigned to"), people),
+      h("label", {}, "Notes", notes)
+    ], item ? "Save changes" : "Add to schedule", (f) => {
+      const body = { title: f.title, startDate: f.startDate, endDate: f.endDate || null, notes: f.notes || null,
+        assigneeIds: [...people.querySelectorAll("input:checked")].map(i => i.value) };
+      return item ? api("/api/schedule/" + item.id, "PUT", body) : api("/api/projects/" + p.id + "/schedule", "POST", body);
+    });
+  }
+
+  // Which weekdays the company works, and its days off. Owner and office edit it.
+  function workCalendarPanel() {
+    const edit = canManage();
+    const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let off = (calendar.nonWorkdays || []).map(d => ({ date: d.date, name: d.name }));
+    const err = h("p", { class: "err", role: "alert" });
+    const week = h("div", { class: "wkdays" }, [1, 2, 3, 4, 5, 6, 0].map(d =>
+      h("label", {}, h("input", { type: "checkbox", value: d, checked: calendar.workDays.includes(d) ? "" : false, disabled: edit ? false : "" }), names[d])));
+    const list = h("div", { class: "stack" });
+    const draw = () => list.replaceChildren(...(off.length ? off.map((d, n) => h("div", { class: "offrow" },
+      h("input", { type: "date", value: d.date, disabled: edit ? false : "", "aria-label": "Date", onchange: (e) => { d.date = e.target.value; } }),
+      h("input", { value: d.name, maxlength: 100, placeholder: "Day off", disabled: edit ? false : "", "aria-label": "Name", oninput: (e) => { d.name = e.target.value; } }),
+      edit ? h("button", { class: "x", type: "button", "aria-label": "Remove " + (d.name || d.date), onclick: () => { off.splice(n, 1); draw(); } }, "×") : h("span"))) :
+      [h("p", { class: "sub", style: "margin:0" }, "No days off added yet.")]));
+    draw();
+    const save = h("button", { class: "btn", type: "button", onclick: async () => {
+      err.textContent = ""; save.disabled = true;
+      try {
+        const workDays = [...week.querySelectorAll("input:checked")].map(i => +i.value);
+        calendar = await api("/api/work-calendar", "PUT", { workDays, nonWorkdays: off.filter(d => d.date).map(d => ({ date: d.date, name: d.name || null })) });
+        off = calendar.nonWorkdays.map(d => ({ date: d.date, name: d.name })); draw();
+        save.textContent = "Saved";
+        setTimeout(() => { save.textContent = "Save work calendar"; }, 1500);
+      } catch (ex) { err.textContent = ex.message; }
+      save.disabled = false;
+    } }, "Save work calendar");
+    return h("div", { class: "group" },
+      h("h2", {}, "Work calendar"),
+      h("div", { class: "panel" },
+        h("p", { class: "sub", style: "margin:0" }, "The days your company works. The agenda marks the rest, and the schedule counts only workdays."),
+        week,
+        h("span", { class: "label" }, "Holidays and other days off"),
+        list,
+        edit && h("div", { class: "quick" }, h("button", { class: "btn ghost sm", type: "button", onclick: () => { off.push({ date: todayStr(), name: "" }); draw(); } }, "Add a day off")),
+        err,
+        edit && h("div", {}, save)));
   }
 
   /* ---------- Recent activity ---------- */
@@ -814,6 +1006,7 @@
             h("p", {}, l.notes),
             thumbs(byLog(l.id), ordered))) : h("p", { class: "sub" }, "No logs yet.")),
         h("div", { class: "stack", style: "gap:20px" },
+          schedulePanel(p),
           canManage() ? estimatesPanel(p) : null,
           canManage() ? changeOrdersPanel(p) : null,
           canManage() ? invoicesPanel(p) : null,
@@ -884,6 +1077,7 @@
               catch (ex) { err.textContent = ex.message; }
             } }, "New link"),
             h("button", { class: "link danger", onclick: () => confirmDelete("Cancel the invite for " + i.name + "? Their link stops working.", "/api/team/invites/" + i.id) }, "Cancel")]))))) : null,
+      workCalendarPanel(),
       h("div", { class: "group" },
         h("h2", {}, "What each role can do"),
         h("ul", { class: "roles" }, ROLES.map(r => h("li", {}, h("b", {}, r.label + ": "), r.about)))));

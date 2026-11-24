@@ -27,10 +27,10 @@ public static class Estimates
         jobs.MapGet("/{id:guid}/change-orders", (Guid id, ClaimsPrincipal me, AppDbContext db) =>
             ListDocs(db, id, AccountId(me), EstimateKind.ChangeOrder));
 
-        jobs.MapPost("/{id:guid}/estimates", (Guid id, EstimateRequest r, ClaimsPrincipal me, AppDbContext db) =>
-            CreateDoc(db, id, AccountId(me), EstimateKind.Estimate, r));
-        jobs.MapPost("/{id:guid}/change-orders", (Guid id, EstimateRequest r, ClaimsPrincipal me, AppDbContext db) =>
-            CreateDoc(db, id, AccountId(me), EstimateKind.ChangeOrder, r));
+        jobs.MapPost("/{id:guid}/estimates", (Guid id, EstimateRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
+            CreateDoc(db, Me(ctx), id, AccountId(me), EstimateKind.Estimate, r));
+        jobs.MapPost("/{id:guid}/change-orders", (Guid id, EstimateRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
+            CreateDoc(db, Me(ctx), id, AccountId(me), EstimateKind.ChangeOrder, r));
 
         // The job's contract: the latest approved estimate, plus approved change
         // orders, gives the revised contract total.
@@ -44,7 +44,7 @@ public static class Estimates
         });
 
         // Saves the whole estimate: details plus the full list of line items.
-        estimates.MapPut("/{id:guid}", async (Guid id, EstimateRequest r, ClaimsPrincipal me, AppDbContext db) =>
+        estimates.MapPut("/{id:guid}", async (Guid id, EstimateRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var (estimate, oldItems) = await Load(db, id, AccountId(me));
             if (estimate is null) return Results.NotFound();
@@ -56,23 +56,26 @@ public static class Estimates
             db.EstimateItems.RemoveRange(oldItems);
             var items = MakeItems(estimate, r.Items!);
             db.EstimateItems.AddRange(items);
+            await Note(db, ctx, estimate, "updated " + Label(estimate));
             await db.SaveChangesAsync();
             return Results.Ok(View(estimate, items));
         });
 
-        estimates.MapPut("/{id:guid}/status", async (Guid id, StatusRequest r, ClaimsPrincipal me, AppDbContext db) =>
+        estimates.MapPut("/{id:guid}/status", async (Guid id, StatusRequest r, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var (estimate, items) = await Load(db, id, AccountId(me));
             if (estimate is null) return Results.NotFound();
             if (!Enum.IsDefined(typeof(EstimateStatus), r.Status)) return Bad("Unknown status.");
+            var changed = estimate.Status != (EstimateStatus)r.Status;
             estimate.Status = (EstimateStatus)r.Status;
             estimate.UpdatedAt = DateTime.UtcNow;
+            if (changed) await Note(db, ctx, estimate, $"marked {Name(estimate.Kind)} #{estimate.Number} {estimate.Status.ToString().ToLowerInvariant()}");
             await db.SaveChangesAsync();
             return Results.Ok(View(estimate, items));
         });
 
         // Makes a new draft with the same details and line items.
-        estimates.MapPost("/{id:guid}/copy", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+        estimates.MapPost("/{id:guid}/copy", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var accountId = AccountId(me);
             var (source, sourceItems) = await Load(db, id, accountId);
@@ -100,11 +103,16 @@ public static class Estimates
             }).ToList();
             db.Estimates.Add(copy);
             db.EstimateItems.AddRange(items);
-            await Saving.SaveNumbered(db, () => NextNumber(db, accountId, copy.Kind), n => copy.Number = n);
+            var line = await Note(db, ctx, copy, "");
+            await Saving.SaveNumbered(db, () => NextNumber(db, accountId, copy.Kind), n =>
+            {
+                copy.Number = n;
+                line.Text = $"copied {Name(source.Kind)} #{source.Number} to #{n}";
+            });
             return Results.Created($"/api/estimates/{copy.Id}", View(copy, items));
         });
 
-        estimates.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, AppDbContext db) =>
+        estimates.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
         {
             var (estimate, items) = await Load(db, id, AccountId(me));
             if (estimate is null) return Results.NotFound();
@@ -112,6 +120,7 @@ public static class Estimates
                 return Results.Conflict(new { error = $"This {Name(estimate.Kind)} is approved, so it can't be deleted. If it was approved by mistake, change its status first." });
             db.EstimateItems.RemoveRange(items);
             db.Estimates.Remove(estimate);
+            await Note(db, ctx, estimate, "deleted " + Label(estimate));
             await db.SaveChangesAsync();
             return Results.NoContent();
         });
@@ -188,6 +197,13 @@ public static class Estimates
     // ---------- Helpers ----------
 
     static string Name(EstimateKind kind) => kind == EstimateKind.ChangeOrder ? "change order" : "estimate";
+    static string FeedKind(EstimateKind kind) => kind == EstimateKind.ChangeOrder ? "change-order" : "estimate";
+    static string Label(Estimate e) => $"{Name(e.Kind)} #{e.Number} · {e.Title}";
+
+    // Adds a line to the recent activity feed. Field crew don't see these.
+    static Task<Activity> Note(AppDbContext db, HttpContext ctx, Estimate e, string text) =>
+        Feed.Add(db, Me(ctx), FeedKind(e.Kind), text, e.ProjectId, officeOnly: true);
+    static User Me(HttpContext ctx) => (User)ctx.Items["me"]!;
 
     static async Task<IResult> ListDocs(AppDbContext db, Guid projectId, Guid accountId, EstimateKind kind)
     {
@@ -198,7 +214,7 @@ public static class Estimates
         return Results.Ok(list.Select(e => View(e, items.Where(i => i.EstimateId == e.Id))));
     }
 
-    static async Task<IResult> CreateDoc(AppDbContext db, Guid projectId, Guid accountId, EstimateKind kind, EstimateRequest r)
+    static async Task<IResult> CreateDoc(AppDbContext db, User me, Guid projectId, Guid accountId, EstimateKind kind, EstimateRequest r)
     {
         if (!await db.Projects.AnyAsync(p => p.Id == projectId && p.AccountId == accountId)) return Results.NotFound();
         if (Check(r, kind) is IResult bad) return bad;
@@ -212,7 +228,12 @@ public static class Estimates
         var items = MakeItems(estimate, r.Items!);
         db.Estimates.Add(estimate);
         db.EstimateItems.AddRange(items);
-        await Saving.SaveNumbered(db, () => NextNumber(db, accountId, kind), n => estimate.Number = n);
+        var line = await Feed.Add(db, me, FeedKind(kind), "", projectId, officeOnly: true);
+        await Saving.SaveNumbered(db, () => NextNumber(db, accountId, kind), n =>
+        {
+            estimate.Number = n;
+            line.Text = "created " + Label(estimate);
+        });
         return Results.Created($"/api/estimates/{estimate.Id}", View(estimate, items));
     }
 

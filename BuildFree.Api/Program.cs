@@ -547,9 +547,9 @@ projects.MapPut("/{id:guid}", async (Guid id, ProjectRequest r, ClaimsPrincipal 
 }).AddEndpointFilter(OfficeOnly);
 
 // Deleting a job also deletes its daily logs, their photos, its to-dos, its
-// schedule, and its draft estimates and invoices. A job with an approved estimate or change
-// order, or an invoice that went out, holds real money records, so it can't
-// be deleted; mark it Complete instead.
+// schedule, and its draft estimates and invoices. Time worked on it is kept.
+// A job with an approved estimate or change order, or an invoice that went
+// out, holds real money records, so it can't be deleted; mark it Complete instead.
 projects.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db, IPhotoStore store, ILogger<Program> logger) =>
 {
     var accountId = AccountId(me);
@@ -946,7 +946,8 @@ team.MapPost("/{id:guid}/reset-link", async (Guid id, ClaimsPrincipal me, HttpCo
     return Results.Ok(new { code = ResetCodes.Make(keyBytes, user, expiresAt), user.Name, user.Email, expiresAt });
 }).AddEndpointFilter(OwnerOnly);
 
-// Removing someone locks them out right away. Their daily logs and photos stay.
+// Removing someone locks them out right away. Their daily logs, photos and
+// time stay; if they're on the clock, they're clocked out now.
 team.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx, AppDbContext db) =>
 {
     var accountId = AccountId(me);
@@ -959,6 +960,8 @@ team.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal me, HttpContext ctx
     foreach (var job in managed) job.ManagerIds = job.ManagerIds.Where(m => m != id).ToList();
     var assigned = await db.ScheduleItems.Where(i => i.AccountId == accountId && i.AssigneeIds.Contains(id)).ToListAsync();
     foreach (var item in assigned) item.AssigneeIds = item.AssigneeIds.Where(a => a != id).ToList();
+    var onTheClock = await db.TimeEntries.FirstOrDefaultAsync(e => e.AccountId == accountId && e.UserId == id && e.ClockOut == null);
+    if (onTheClock is not null) { onTheClock.ClockOut = DateTime.UtcNow; onTheClock.UpdatedAt = DateTime.UtcNow; }
     Feed.Add(db, Me(ctx), "team", $"removed {user.Name} from the team");
     await db.SaveChangesAsync();
     return Results.NoContent();
@@ -1042,11 +1045,12 @@ app.MapPost("/api/auth/reset-password", async (PasswordResetRequest r, AppDbCont
     return Results.Ok(new { token = MakeToken(user) });
 }).RequireRateLimiting("auth");
 
-// ---------- Estimates, change orders, invoices, activity and the schedule (see their own files) ----------
+// ---------- Estimates, change orders, invoices, activity, the schedule and the time clock (see their own files) ----------
 
 app.MapEstimates();
 app.MapInvoices();
 app.MapActivity();
 app.MapSchedule();
+app.MapTimeClock();
 
 app.Run();

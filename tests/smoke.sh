@@ -733,6 +733,8 @@ LIMITED=""
 for n in $(seq 1 130); do
   if [[ "$(curl -s -o /tmp/smoke_body -w "%{http_code}" "$API/api/invites/not-a-real-code")" == "429" ]]; then LIMITED=$n; break; fi
 done
+[[ -n "$LIMITED" ]] || { echo "FAIL: 130 tries in a row were never slowed down"; exit 1; }
+BODY="$(cat /tmp/smoke_body)"
 [[ "$(field .error)" == "Too many tries. Wait a minute and try again." ]] || { echo "FAIL: rate limit message wrong: $BODY"; exit 1; }
 PASS=$((PASS + 1)); echo "ok   slowed down after $LIMITED quick tries -> 429"
 

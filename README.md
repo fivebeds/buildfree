@@ -10,11 +10,11 @@ I'm building it in public while I learn to code. Weekly notes live in the `devlo
 
 ## Milestone 1
 
-Sign up and log in, create clients and projects, and post daily logs with job photos. Good enough to run on one real job. All of this works now: sign up, log in, clients, jobs, daily logs with photos, to-dos, team members with roles, estimates, change orders, and invoices with payments.
+Sign up and log in, create clients and projects, and post daily logs with job photos. Good enough to run on one real job. All of this works now: sign up, log in, clients, jobs, daily logs with photos, to-dos, team members with roles, estimates, change orders, invoices with payments, a schedule, and a time clock with timesheets.
 
 ## Later
 
-Estimate, change order and invoice approval by the homeowner, online payments, a time clock, a homeowner portal, and QuickBooks export.
+Estimate, change order and invoice approval by the homeowner, online payments, a homeowner portal, and QuickBooks export.
 
 ## Stack
 
@@ -63,6 +63,16 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | PUT, DELETE | `/api/schedule/{id}` | Owner and office only. Edit or delete a schedule item |
 | POST | `/api/schedule/{id}/toggle` | Mark a schedule item done or not done (anyone on the team) |
 | GET | `/api/schedule` | The agenda across all jobs: items between `from` and `to` (up to 62 days; this week Monday to Sunday by default), optionally for one `userId`, plus the workdays and days off in that range |
+| GET | `/api/time/current` | `{ entry }`: your time clock entry while you're on the clock, or null |
+| POST | `/api/time/clock-in` | Clock in to a job (`projectId`, optional `notes`). 409 if you're already on the clock |
+| POST | `/api/time/clock-out` | Clock out, with optional `breakMinutes` (unpaid) and `notes` |
+| POST | `/api/time/switch` | Clock out of the current job and into `projectId` at the same moment (optional `breakMinutes` for the job being left) |
+| GET | `/api/time` | Time between `from` and `to` (up to 62 days; this week Monday to Sunday by default), optionally for one `userId` or `projectId`, with each person's totals (regular, overtime, double time, approved) and hours by job. Field crew get only their own |
+| GET | `/api/time/now` | Owner and office only. Who's on the clock right now |
+| GET | `/api/time/export` | Owner and office only. The same time as a CSV file for payroll |
+| POST | `/api/time` | Owner and office only. Add time by hand: `userId`, `projectId`, `clockIn`, `clockOut`, `breakMinutes`, `notes` |
+| PUT, DELETE | `/api/time/{id}` | Owner and office only. Fix or delete time (not once it's approved) |
+| POST | `/api/time/approve` | Owner and office only. Approve `entryIds`, or unapprove them with `"approved": false` |
 | GET, PUT | `/api/work-calendar` | The weekdays the company works (0 Sunday to 6 Saturday) and its days off. Changing it is owner and office only; it replaces the whole list |
 | GET, POST | `/api/projects/{id}/logs` | List or add daily logs for a job |
 | PUT, DELETE | `/api/logs/{id}` | Edit or delete a daily log (deleting removes its photos) |
@@ -79,7 +89,7 @@ All endpoints except sign up and log in need `Authorization: Bearer <token>`. Ev
 | POST | `/api/team/invites` | Owner only. Invite someone by name, email and role; returns a one-time join code |
 | DELETE | `/api/team/invites/{id}` | Owner only. Cancel an invite |
 | PUT | `/api/team/{userId}/role` | Owner only. Change someone's role: 0 Owner, 1 Office, 2 Field |
-| DELETE | `/api/team/{userId}` | Owner only. Remove someone; they're locked out right away and their logs and photos stay |
+| DELETE | `/api/team/{userId}` | Owner only. Remove someone; they're locked out right away, clocked out if they're on the clock, and their logs, photos and time stay |
 | GET | `/api/invites/{code}` | No login needed. What the join screen shows: company, name, email, role |
 | POST | `/api/auth/accept-invite` | No login needed. Set a name and password from an invite code; returns a token |
 | PUT | `/api/me/password` | Change your own password (current and new password). Returns a new token and logs you out on every other device |
@@ -131,9 +141,19 @@ The job's billing summary compares the revised contract (approved estimate plus 
 
 Each job has a schedule: the work, inspections and deliveries, each with a start and end date (one day if the end is left blank), the people assigned and notes. The owner and office plan it; anyone can check an item off. An item that isn't done after its end date shows as late, and items running more than a day show how many workdays they take.
 
-The Today page shows the week's agenda across every job, Monday to Sunday, with arrows for other weeks and a switch for only what's assigned to you. Days off are marked, and items running through a day off aren't repeated on it.
+The Today page shows the week's agenda across every job, Monday to Sunday, with arrows for other weeks and a switch for only what's assigned to you. Days off are marked, and items running through a day off aren't repeated on it. Under each item is the job's address; tapping it (or the address on the job's page) opens directions in the phone's maps app: Apple Maps on iPhones and iPads, Google Maps elsewhere.
 
 The work calendar on the Team page sets which weekdays the company works (Monday to Friday by default) and its holidays and other days off. Deleting a job deletes its schedule, and removing someone from the team takes them off their schedule items.
+
+## Time clock
+
+Everyone clocks in and out of jobs from the Today page, a job's page or the Time tab, on a phone or a computer. Clocking out asks for an unpaid break, and "Switch job" moves you to another job without a gap. You can only be on the clock once at a time, even if you tap twice.
+
+The Time tab shows a week of time, Monday to Sunday: your own, or for the owner and office, everyone's, with a filter by person. Each person gets totals split California-style: over 8 hours a day or 40 a week is overtime, and over 12 hours a day is double time (payroll should still check special cases, like a 7th day in a row). Days over 8 hours and shifts over 12 hours are flagged, including someone who seems to have forgotten to clock out.
+
+The owner and office see who's on the clock now, add time someone forgot, fix mistakes (fixed time is marked "edited"), approve each person's week and download the week as a CSV file for payroll. Approved time is locked until it's unapproved. Days and weeks are Pacific time, and a whole shift counts on the day it started. Field crew see only their own time and can't change it after clocking out; the office fixes it.
+
+Time is a payroll record, so it stays when a job is deleted (it keeps the job's name) and when someone leaves the team (if they were on the clock, they're clocked out then). Clocking in and out, fixes and approvals show in the office's activity feed, not the field crew's.
 
 ## Team members
 
@@ -142,8 +162,8 @@ Each person gets their own login. Whoever signs up is the company's owner. The o
 | Role | Can do |
 |---|---|
 | Owner | Everything, including inviting people, changing roles and removing people |
-| Office | Jobs, clients, daily logs, photos and to-dos. Can't manage the team |
-| Field | Sees every job. Adds daily logs, photos and to-dos, and edits or deletes only the logs and photos they added |
+| Office | Jobs, clients, daily logs, photos, to-dos and everyone's time. Can't manage the team |
+| Field | Sees every job. Clocks in and out, adds daily logs, photos and to-dos, and edits or deletes only the logs and photos they added |
 
 The API checks the user on every request, so a role change or removal takes effect immediately, even though the old login token hasn't expired. A company always keeps at least one owner. Daily logs and photos record who added them.
 
@@ -190,6 +210,7 @@ Once a `Migrations` folder exists, the regular checks on every pull request fail
 
 - A job with an approved estimate or change order, or an invoice that went out (sent, paid or void), can't be deleted. Mark it Complete instead. Jobs with only drafts can still be deleted.
 - Approved estimates and change orders can't be deleted, and sent invoices can't be deleted (void them instead). Invoices with payments can't be edited, voided or deleted.
+- Approved time can't be changed or deleted until it's unapproved, and time stays when its job is deleted or the person leaves the team.
 - Estimate, change order and invoice numbers stay unique even when two people create one at the same moment; the API quietly picks the next number and tries again.
 - Unexpected errors come back as a short message (`{"error": "..."}`) and the details go to the API log. Requests the API can't read, like broken JSON, get a clear 400.
 

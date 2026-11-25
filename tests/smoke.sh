@@ -489,7 +489,7 @@ call POST /api/time/switch "$F" "{\"projectId\":\"$JOB2\"}" 200
 FT2="$(field .id)"
 [[ "$(field .jobName)" == "#5226 Garage ADU" && "$(field .clockOut)" == "null" ]] || { echo "FAIL: switching jobs wrong: $BODY"; exit 1; }
 call GET /api/time "$F" "" 200
-[[ "$(echo "$BODY" | jq -r --arg a "$FT1" --arg b "$FT2" '[.entries[] | select(.id == $a and .clockOut != null)] | length == 1 and ([.entries[] | select(.id == $b and .clockOut == null)] | length == 1) and .people[0].onTheClock')" == "true" ]] || { echo "FAIL: switching should close the first job's time: $BODY"; exit 1; }
+[[ "$(echo "$BODY" | jq -r --arg a "$FT1" --arg b "$FT2" '([.entries[] | select(.id == $a and .clockOut != null)] | length == 1) and ([.entries[] | select(.id == $b and .clockOut == null)] | length == 1) and .people[0].onTheClock')" == "true" ]] || { echo "FAIL: switching should close the first job's time: $BODY"; exit 1; }
 call POST /api/time/clock-out "$F" '{"breakMinutes":-5}' 400
 call POST /api/time/clock-out "$F" '{"breakMinutes":600}' 400
 call POST /api/time/clock-out "$F" '{"notes":"Done for the day"}' 200

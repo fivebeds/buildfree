@@ -507,7 +507,7 @@ call POST /api/time/clock-out "$O" '{}' 200
 
 # A week of hand-entered time (Pacific, no time zone) for Frank, California overtime rules:
 # Mon 10 h (2 OT), Tue 13 h (4 OT, 1 double), Wed-Fri 8 h, Sat 4 h (past 40 regular, so OT).
-add_time() { call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"$1\",\"clockOut\":\"$2\",\"breakMinutes\":$3$4}" 201; }
+add_time() { call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"$1\",\"clockOut\":\"$2\",\"breakMinutes\":$3${4:-}}" 201; }
 add_time 2026-11-02T07:00:00 2026-11-02T17:30:00 30 ',"notes":"=SUM(A1)"'
 TMON="$(field .id)"
 [[ "$(field .minutes)" == "600" && "$(field .day)" == "2026-11-02" && "$(field .editedBy)" == "Olivia" && "$(field .clockIn)" == "2026-11-02T15:00:00Z" ]] || { echo "FAIL: hand-entered time wrong: $BODY"; exit 1; }

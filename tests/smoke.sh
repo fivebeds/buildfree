@@ -74,6 +74,7 @@ call GET /api/health "" "" 200
 PAGE="$(curl -s -w "\n%{http_code}" "$API/")"
 [[ "${PAGE##*$'\n'}" == "200" && "$PAGE" == *"<title>BuildFree</title>"* ]] || { echo "FAIL: the web app isn't served at /"; exit 1; }
 [[ "$(curl -s -o /dev/null -w "%{http_code}" "$API/estimates.js")" == "200" ]] || { echo "FAIL: estimates.js isn't served"; exit 1; }
+[[ "$(curl -s -o /dev/null -w "%{http_code}" "$API/time.js")" == "200" ]] || { echo "FAIL: time.js isn't served"; exit 1; }
 PASS=$((PASS + 1)); echo "ok   web app served at /"
 
 echo "== Sign up and log in"
@@ -467,6 +468,118 @@ for t in "scheduled Framing for Mon, Dec 7 to Fri, Dec 11" "moved Framing to Tue
 done
 PASS=$((PASS + 1)); echo "ok   schedule changes show in the activity"
 
+echo "== Time clock"
+call GET /api/time/current "$F" "" 200
+[[ "$(field .entry)" == "null" ]] || { echo "FAIL: nobody should be on the clock yet: $BODY"; exit 1; }
+call POST /api/time/clock-in "$F" '{}' 400
+call POST /api/time/clock-in "$F" '{"projectId":"00000000-0000-0000-0000-000000000001"}' 400
+call POST /api/time/clock-in "$F" "{\"projectId\":\"$JOB\",\"notes\":\"Framing\"}" 200
+FT1="$(field .id)"
+[[ "$(field .jobName)" == "#5225 Kitchen + pantry remodel" && "$(field .userName)" == "Frank R" && "$(field .clockOut)" == "null" && "$(field .minutes)" == "null" ]] || { echo "FAIL: clock-in wrong: $BODY"; exit 1; }
+call POST /api/time/clock-in "$F" "{\"projectId\":\"$JOB\"}" 409
+call GET /api/time/current "$F" "" 200
+[[ "$(field .entry.id)" == "$FT1" ]] || { echo "FAIL: current entry wrong: $BODY"; exit 1; }
+call GET /api/time/now "$O" "" 200
+[[ "$(field 'length')" == "1" && "$(field '.[0].userName')" == "Frank R" ]] || { echo "FAIL: who's on the clock wrong: $BODY"; exit 1; }
+call GET /api/time/now "$F" "" 403
+call POST /api/projects "$A" '{"name":"Garage ADU"}' 201
+JOB2="$(field .id)"
+call POST /api/time/switch "$F" "{\"projectId\":\"$JOB\"}" 400
+call POST /api/time/switch "$F" "{\"projectId\":\"$JOB2\"}" 200
+FT2="$(field .id)"
+[[ "$(field .jobName)" == "#5226 Garage ADU" && "$(field .clockOut)" == "null" ]] || { echo "FAIL: switching jobs wrong: $BODY"; exit 1; }
+call GET /api/time "$F" "" 200
+[[ "$(echo "$BODY" | jq -r --arg a "$FT1" --arg b "$FT2" '([.entries[] | select(.id == $a and .clockOut != null)] | length == 1) and ([.entries[] | select(.id == $b and .clockOut == null)] | length == 1) and .people[0].onTheClock')" == "true" ]] || { echo "FAIL: switching should close the first job's time: $BODY"; exit 1; }
+call POST /api/time/clock-out "$F" '{"breakMinutes":-5}' 400
+call POST /api/time/clock-out "$F" '{"breakMinutes":600}' 400
+call POST /api/time/clock-out "$F" '{"notes":"Done for the day"}' 200
+[[ "$(field .clockOut)" != "null" && "$(field .minutes)" == "0" && "$(field .notes)" == "Done for the day" ]] || { echo "FAIL: clock-out wrong: $BODY"; exit 1; }
+call POST /api/time/clock-out "$F" '{}' 409
+: > /tmp/smoke_parallel
+for n in 1 2 3 4; do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST "$API/api/time/clock-in" -H "Content-Type: application/json" -H "Authorization: Bearer $O" \
+    -d "{\"projectId\":\"$JOB\"}" >> /tmp/smoke_parallel &
+done
+wait
+[[ "$(grep -c '^200$' /tmp/smoke_parallel)" == "1" && "$(grep -c '^409$' /tmp/smoke_parallel)" == "3" ]] || { echo "FAIL: four quick clock-ins should give one entry: $(tr '\n' ' ' < /tmp/smoke_parallel)"; exit 1; }
+PASS=$((PASS + 1)); echo "ok   4 clock-ins at once -> one on the clock"
+call POST /api/time/clock-out "$O" '{}' 200
+
+# A week of hand-entered time (Pacific, no time zone) for Frank, California overtime rules:
+# Mon 10 h (2 OT), Tue 13 h (4 OT, 1 double), Wed-Fri 8 h, Sat 4 h (past 40 regular, so OT).
+add_time() { call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"$1\",\"clockOut\":\"$2\",\"breakMinutes\":$3${4:-}}" 201; }
+add_time 2026-11-02T07:00:00 2026-11-02T17:30:00 30 ',"notes":"=SUM(A1)"'
+TMON="$(field .id)"
+[[ "$(field .minutes)" == "600" && "$(field .day)" == "2026-11-02" && "$(field .editedBy)" == "Olivia" && "$(field .clockIn)" == "2026-11-02T15:00:00Z" ]] || { echo "FAIL: hand-entered time wrong: $BODY"; exit 1; }
+add_time 2026-11-03T06:00:00 2026-11-03T19:00:00 0
+add_time 2026-11-04T07:00:00 2026-11-04T15:30:00 30
+add_time 2026-11-05T07:00:00 2026-11-05T15:30:00 30
+add_time 2026-11-06T07:00:00 2026-11-06T15:30:00 30
+add_time 2026-11-07T15:00:00Z 2026-11-07T19:00:00Z 0
+TSAT="$(field .id)"
+[[ "$(field .day)" == "2026-11-07" && "$(field .minutes)" == "240" ]] || { echo "FAIL: time sent in UTC should land on the Pacific day: $BODY"; exit 1; }
+call POST /api/time "$A" "{\"userId\":\"$AID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-02T08:00:00\",\"clockOut\":\"2026-11-02T12:00:00\"}" 201
+call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-02T12:00:00\",\"clockOut\":\"2026-11-02T13:00:00\"}" 400
+[[ "$(field .error)" == "This overlaps Frank R's time on Mon, Nov 2"* ]] || { echo "FAIL: overlap message wrong: $BODY"; exit 1; }
+call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-09T08:00:00\"}" 400
+call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-09T08:00:00\",\"clockOut\":\"2026-11-09T07:00:00\"}" 400
+call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-09T08:00:00\",\"clockOut\":\"2026-11-10T09:00:00\"}" 400
+call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2099-01-01T08:00:00\",\"clockOut\":\"2099-01-01T09:00:00\"}" 400
+call POST /api/time "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-09T08:00:00\",\"clockOut\":\"2026-11-09T09:00:00\",\"breakMinutes\":90}" 400
+call POST /api/time "$O" "{\"userId\":\"$BID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-09T08:00:00\",\"clockOut\":\"2026-11-09T09:00:00\"}" 400
+call POST /api/time "$O" "{\"userId\":\"$FID\",\"clockIn\":\"2026-11-09T08:00:00\",\"clockOut\":\"2026-11-09T09:00:00\"}" 400
+call POST /api/time "$F" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-09T08:00:00\",\"clockOut\":\"2026-11-09T09:00:00\"}" 403
+call GET "/api/time?from=2026-11-02&to=2026-11-08&userId=$FID" "$O" "" 200
+[[ "$(field '.entries | length')" == "6" && "$(field '.people | length')" == "1" ]] || { echo "FAIL: one person's week wrong: $BODY"; exit 1; }
+[[ "$(field '.people[0] | [.minutes, .regular, .overtime, .doubleTime, .approved] == [3060, 2400, 600, 60, 0]')" == "true" ]] || { echo "FAIL: overtime math wrong: $(field .people)"; exit 1; }
+call GET "/api/time?from=2026-11-02&to=2026-11-08" "$O" "" 200
+[[ "$(field '.people | length')" == "2" && "$(field '.jobs | length')" == "1" && "$(field '.jobs[0].minutes')" == "3300" ]] || { echo "FAIL: the company's week wrong: $BODY"; exit 1; }
+call GET "/api/time?from=2026-11-02&to=2026-11-08&userId=$AID" "$F" "" 200
+[[ "$(echo "$BODY" | jq -r --arg f "$FID" '(.entries | length) == 6 and all(.entries[]; .userId == $f)')" == "true" ]] || { echo "FAIL: field crew should see only their own time: $BODY"; exit 1; }
+call GET "/api/time?from=2026-11-08&to=2026-11-02" "$O" "" 400
+call GET "/api/time?from=2026-11-01&to=2027-01-15" "$O" "" 400
+call PUT "/api/time/$TSAT" "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-07T07:00:00\",\"clockOut\":\"2026-11-07T12:00:00\"}" 200
+[[ "$(field .minutes)" == "300" ]] || { echo "FAIL: time edit not saved: $BODY"; exit 1; }
+call PUT "/api/time/$TSAT" "$F" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-07T07:00:00\",\"clockOut\":\"2026-11-07T13:00:00\"}" 403
+call GET "/api/time?from=2026-11-02&to=2026-11-08&userId=$FID" "$O" "" 200
+WEEK="$(field '[.entries[].id]')"
+call POST /api/time/approve "$O" "{\"entryIds\":$WEEK}" 200
+[[ "$(field 'all(.[]; .approved and .approvedBy == "Olivia")')" == "true" ]] || { echo "FAIL: approving didn't approve: $BODY"; exit 1; }
+call PUT "/api/time/$TSAT" "$O" "{\"userId\":\"$FID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-07T07:00:00\",\"clockOut\":\"2026-11-07T13:00:00\"}" 409
+call DELETE "/api/time/$TSAT" "$O" "" 409
+call POST /api/time/approve "$F" "{\"entryIds\":$WEEK}" 403
+call POST /api/time/approve "$O" '{"entryIds":[]}' 400
+call POST /api/time/approve "$O" "{\"entryIds\":[\"$TSAT\"],\"approved\":false}" 200
+call DELETE "/api/time/$TSAT" "$O" "" 204
+call GET "/api/time?from=2026-11-02&to=2026-11-08&userId=$FID" "$O" "" 200
+[[ "$(field '.entries | length')" == "5" && "$(field '.people[0].approved')" == "2820" ]] || { echo "FAIL: approved total wrong after unapproving and deleting: $BODY"; exit 1; }
+getfile "/api/time/export?from=2026-11-02&to=2026-11-08" "$O" 200
+[[ "$CTYPE" == text/csv* ]] && grep -q "Date,Person,Job number,Job,Clock in" /tmp/smoke_file && grep -q "Frank R" /tmp/smoke_file && grep -q "'=SUM(A1)" /tmp/smoke_file \
+  && grep -q "^Frank R,47.00,40.00,6.00,1.00,47.00" /tmp/smoke_file || { echo "FAIL: timesheet download wrong:"; cat /tmp/smoke_file; exit 1; }
+PASS=$((PASS + 1)); echo "ok   timesheet download"
+getfile "/api/time/export" "$F" 403
+call POST /api/time/clock-in "$F" "{\"projectId\":\"$JOB\"}" 200
+FT3="$(field .id)"
+call POST /api/time/approve "$O" "{\"entryIds\":[\"$FT3\"]}" 400
+call GET /api/time/now "$B" "" 200
+[[ "$(field 'length')" == "0" ]] || { echo "FAIL: company B sees company A's clock"; exit 1; }
+call GET "/api/time?from=2026-11-02&to=2026-11-08&userId=$FID" "$B" "" 200
+[[ "$(field '.entries | length')" == "0" ]] || { echo "FAIL: company B sees company A's time"; exit 1; }
+call POST /api/time/clock-in "$B" "{\"projectId\":\"$JOB\"}" 400
+call PUT "/api/time/$TMON" "$B" "{\"userId\":\"$BID\",\"projectId\":\"$JOB\",\"clockIn\":\"2026-11-02T07:00:00\",\"clockOut\":\"2026-11-02T08:00:00\"}" 404
+call DELETE "/api/time/$TMON" "$B" "" 404
+call POST /api/time/approve "$B" "{\"entryIds\":[\"$TMON\"],\"approved\":false}" 404
+call DELETE "/api/projects/$JOB2" "$A" "" 204
+call GET /api/time "$O" "" 200
+[[ "$(echo "$BODY" | jq -r --arg t "$FT2" '.entries[] | select(.id == $t) | [.projectId, .jobName] == [null, "#5226 Garage ADU"]')" == "true" ]] || { echo "FAIL: time should outlive its deleted job: $BODY"; exit 1; }
+call GET "/api/activity?limit=60" "$A" "" 200
+for t in "clocked in" "switched to this job from #5225 Kitchen + pantry remodel" "clocked out (0 min)" "added 10 h for Frank R on Mon, Nov 2" "changed Frank R's time on Sat, Nov 7" "approved 52 h of Frank R's time" "deleted Frank R's time on Sat, Nov 7"; do
+  [[ "$(echo "$BODY" | jq -r --arg t "$t" 'map(.text) | index($t) != null')" == "true" ]] || { echo "FAIL: activity is missing: $t"; exit 1; }
+done
+call GET "/api/activity?limit=100" "$F" "" 200
+[[ "$(field 'map(select(.kind == "time")) | length')" == "0" ]] || { echo "FAIL: field crew shouldn't see time clock lines: $BODY"; exit 1; }
+PASS=$((PASS + 1)); echo "ok   time clock changes show in the activity, for the office only"
+
 echo "== Password reset links"
 call POST "/api/team/$FID/reset-link" "$F" "" 403
 call POST "/api/team/$FID/reset-link" "$O" "" 403
@@ -522,6 +635,10 @@ call GET /api/projects "$F" "" 401
 call POST /api/auth/login "" "{\"email\":\"field$RUN@example.com\",\"password\":\"changeme123\"}" 401
 call GET "/api/projects/$JOB/logs" "$A" "" 200
 [[ "$(field 'length')" == "2" ]] || { echo "FAIL: removed member's log should stay"; exit 1; }
+call GET /api/time/now "$A" "" 200
+[[ "$(field 'length')" == "0" ]] || { echo "FAIL: a removed member should be clocked out: $BODY"; exit 1; }
+call GET "/api/time?userId=$FID" "$A" "" 200
+[[ "$(echo "$BODY" | jq -r --arg t "$FT3" '[.entries[] | select(.id == $t and .clockOut != null)] | length == 1')" == "true" ]] || { echo "FAIL: a removed member's time should stay, clocked out: $BODY"; exit 1; }
 
 echo "== Company B can't see or change company A's data"
 call GET /api/projects "$B" "" 200

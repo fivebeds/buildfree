@@ -20,6 +20,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Activity> Activities => Set<Activity>();
     public DbSet<ScheduleItem> ScheduleItems => Set<ScheduleItem>();
     public DbSet<NonWorkday> NonWorkdays => Set<NonWorkday>();
+    public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -41,6 +42,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         b.Entity<ScheduleItem>().HasOne<Project>().WithMany().HasForeignKey(i => i.ProjectId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<ScheduleItem>().Property(i => i.AssigneeIds).HasDefaultValueSql("'{}'");
         b.Entity<NonWorkday>().HasIndex(d => new { d.AccountId, d.Date }).IsUnique();
+        // Time entries are payroll records, so they outlive their job: deleting
+        // the job just clears ProjectId (JobName keeps the name). The filtered
+        // unique index lets each person be on the clock only once at a time.
+        b.Entity<TimeEntry>().HasIndex(e => new { e.AccountId, e.ClockIn });
+        b.Entity<TimeEntry>().HasIndex(e => new { e.AccountId, e.UserId, e.ClockIn });
+        b.Entity<TimeEntry>().HasIndex(e => e.UserId).IsUnique().HasFilter("\"ClockOut\" IS NULL").HasDatabaseName("IX_TimeEntries_OnTheClock");
+        b.Entity<TimeEntry>().HasOne<Project>().WithMany().HasForeignKey(e => e.ProjectId).OnDelete(DeleteBehavior.SetNull);
         b.Entity<DailyLog>().HasIndex(l => new { l.AccountId, l.ProjectId });
         b.Entity<TodoItem>().HasIndex(t => new { t.AccountId, t.ProjectId });
         b.Entity<LogPhoto>().HasIndex(p => new { p.AccountId, p.ProjectId });

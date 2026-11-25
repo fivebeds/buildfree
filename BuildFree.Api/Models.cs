@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json.Serialization;
 
 namespace BuildFree.Api;
@@ -229,6 +230,38 @@ public class NonWorkday
     public string Name { get; set; } = "";
 }
 
+// Time someone worked on a job, from the time clock or added by the office.
+// ClockOut is empty while they're still on the clock (one open entry per
+// person). The person's and job's names are kept too, so payroll records still
+// read right after someone leaves the team or a job is deleted. Approved time
+// is locked until it's unapproved.
+public class TimeEntry
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccountId { get; set; }
+    public Guid UserId { get; set; }
+    public string UserName { get; set; } = "";
+    public Guid? ProjectId { get; set; }
+    public string JobName { get; set; } = "";
+    public DateTime ClockIn { get; set; }
+    public DateTime? ClockOut { get; set; }
+    public int BreakMinutes { get; set; }
+    public string? Notes { get; set; }
+    public bool Approved { get; set; }
+    public string? ApprovedBy { get; set; }
+    public DateTime? ApprovedAt { get; set; }
+    // Who last added or changed it by hand (the office), if anyone.
+    public string? EditedBy { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    // The Pacific day the shift started on; the whole shift counts on that day.
+    [NotMapped] public DateOnly Day => Clock.PacificDay(ClockIn);
+
+    // Minutes worked, after the break. Empty while still on the clock.
+    [NotMapped] public int? Minutes => ClockOut is DateTime o ? Math.Max(0, (int)Math.Round((o - ClockIn).TotalMinutes) - BreakMinutes) : null;
+}
+
 // One line in the recent activity feed: who did what, on which job, and when.
 // The job's name is kept too, so the line still reads right after the job is
 // deleted. OfficeOnly lines (estimates, invoices, payments) are hidden from
@@ -272,3 +305,10 @@ public record ScheduleRequest(string? Title, DateOnly? StartDate, DateOnly? EndD
 // WorkDays: 0 = Sunday ... 6 = Saturday, like JavaScript's getDay().
 public record WorkCalendarRequest(List<int>? WorkDays, List<NonWorkdayRequest>? NonWorkdays);
 public record NonWorkdayRequest(DateOnly? Date, string? Name);
+// Clocking in, or switching jobs (BreakMinutes then goes on the job being left).
+public record ClockInRequest(Guid? ProjectId, string? Notes, int? BreakMinutes = null);
+public record ClockOutRequest(int? BreakMinutes, string? Notes);
+// Time added or fixed by the office. ClockOut can be left empty only on time
+// that's still on the clock.
+public record TimeEntryRequest(Guid? UserId, Guid? ProjectId, DateTime? ClockIn, DateTime? ClockOut, int? BreakMinutes, string? Notes);
+public record ApproveTimeRequest(List<Guid>? EntryIds, bool Approved = true);

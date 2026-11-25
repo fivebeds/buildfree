@@ -139,6 +139,10 @@
   .agitem:hover .t { text-decoration: underline; text-underline-offset: 3px; }
   .agitem .t { font-size: 14px; }
   .agitem .sub { font-size: 12px; }
+  .maplink { color: inherit; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+  .maplink::before { content: ""; display: inline-block; width: 9px; height: 9px; border: 2px solid currentColor; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); margin: 0 6px 1px 1px; vertical-align: middle; opacity: 0.7; }
+  .maplink:hover { text-decoration-color: currentColor; }
+  .agmap { font-size: 12px; color: var(--muted); margin: -4px 0 2px 13px; justify-self: start; }
   .weeknav { display: flex; gap: 4px; align-items: center; }
   .weeknav .btn { padding: 3px 9px; font-size: 13px; }
   .minebox { display: flex; gap: 6px; align-items: center; font-weight: 400; font-size: 13px; color: var(--muted); }
@@ -158,6 +162,34 @@
   .offrow { display: grid; grid-template-columns: 150px 1fr 28px; gap: 6px; align-items: center; }
   .offrow input { padding: 7px 8px; }
   .btn.sm { padding: 4px 10px; font-size: 13px; }
+  .clock.on { border-color: var(--b-active); }
+  .clock .err:empty { display: none; }
+  .clockrow { margin-top: 24px; }
+  .clockrow + .grid2 { margin-top: 20px; }
+  @media (min-width: 721px) { .clockrow .clock.on { grid-template-columns: 1fr auto; align-items: center; } .clockrow .clock.on .err { grid-column: 1 / -1; } }
+  .clockhead { display: flex; gap: 12px; align-items: flex-start; }
+  .clockhead b { font-size: 16px; font-weight: 600; }
+  .clockhead .sub { font-size: 13px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--b-active); display: inline-block; flex: none; margin: 7px 0 0 4px; box-shadow: 0 0 0 4px color-mix(in srgb, var(--b-active) 20%, transparent); }
+  .tcrow .dot { margin: 0 0 1px 8px; width: 8px; height: 8px; vertical-align: middle; }
+  .clock .inline select { flex: 3 1 160px; min-width: 0; }
+  .tctable { display: grid; }
+  .tcrow { display: grid; grid-template-columns: 1.6fr repeat(4, 1fr) 1fr auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  .tcrow:first-child { border-top: 0; padding-top: 0; }
+  .tcrow.th { color: var(--muted); font-size: 12px; }
+  .tcrow b { font-weight: 500; }
+  .warnc { color: var(--b-hold); }
+  .tcday { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .tcday:first-of-type { border-top: 0; padding-top: 0; }
+  .tcday .tag { font-size: 12px; }
+  .tcshift { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: start; padding-left: 12px; border-left: 3px solid var(--line-strong); }
+  .tcshift .sub { font-size: 13px; }
+  .tcshift b { font-weight: 500; color: var(--text); }
+  .tcshift .pill { margin-left: 6px; }
+  .pill.ok { border-color: var(--b-active); color: var(--b-active); }
+  .tcnow { display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: center; }
+  .tcnow b { font-weight: 500; }
+  .tcnow .sub { font-size: 13px; }
   .pane { padding: 32px; max-width: 1100px; }
   .grid2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; align-items: start; margin-top: 24px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; display: grid; gap: 14px; }
@@ -267,6 +299,7 @@
     .wrap-sm > input, .todoform input[type=date] { flex: 1 1 140px; }
     .wrap-sm > .btn { flex: 1 0 auto; }
     .todoform input[name=title] { flex-basis: 100%; }
+    .tcrow { grid-template-columns: 1.5fr repeat(4, minmax(0, 1fr)) auto; font-size: 13px; gap: 6px; }
   }
   @media (max-width: 420px) { .top .logo .name { display: none; } }
 </style>
@@ -295,14 +328,15 @@
   let projects = [], clients = [], todos = [];
   let me = null, team = { members: [], invites: [] };
   let calendar = { workDays: [1, 2, 3, 4, 5], nonWorkdays: [] };
+  let clockEntry = null; // my time clock entry while I'm on the clock (see time.js)
 
   // Roles, in the same order as the API. Owners manage the team; owners and
   // office staff manage jobs and clients; field crew add daily logs, photos
   // and to-dos, and can change only the logs and photos they added.
   const ROLES = [
     { label: "Owner", about: "Everything, including inviting people and changing roles." },
-    { label: "Office", about: "Jobs, clients, daily logs, photos and to-dos. Can't manage the team." },
-    { label: "Field", about: "Sees every job. Adds daily logs, photos and to-dos, and edits only their own logs and photos." }
+    { label: "Office", about: "Jobs, clients, daily logs, photos, to-dos and everyone's time. Can't manage the team." },
+    { label: "Field", about: "Sees every job. Clocks in and out, adds daily logs, photos and to-dos, and edits only their own logs and photos." }
   ];
   const isOwner = () => !!me && me.role === 0;
   const canManage = () => !!me && me.role !== 2;
@@ -345,10 +379,12 @@
     return data;
   }
 
-  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; estimates = []; changeOrders = []; contract = null; estimateOpen = null; invoices = []; billing = null; invoiceOpen = null; jobSchedule = []; clearPhotoCache(); render(); }
+  function logout() { token = null; store.set(null); me = null; team = { members: [], invites: [] }; projects = []; clients = []; todos = []; selected = null; photos = []; estimates = []; changeOrders = []; contract = null; estimateOpen = null; invoices = []; billing = null; invoiceOpen = null; jobSchedule = []; clockEntry = null; clearPhotoCache(); render(); }
 
   async function loadData() {
-    [me, team, projects, clients, todos, calendar] = await Promise.all([api("/api/me"), api("/api/team"), api("/api/projects"), api("/api/clients"), api("/api/todos"), api("/api/work-calendar")]);
+    let clock;
+    [me, team, projects, clients, todos, calendar, clock] = await Promise.all([api("/api/me"), api("/api/team"), api("/api/projects"), api("/api/clients"), api("/api/todos"), api("/api/work-calendar"), api("/api/time/current")]);
+    clockEntry = clock.entry;
   }
 
   /* ---------- Log in / sign up ---------- */
@@ -466,6 +502,13 @@
   };
   let jobFilter = prefs.get("bf_job_filter", "open"), jobSort = prefs.get("bf_job_sort", "newest");
   const jobLabel = (p) => (p.number != null ? "#" + p.number + " " : "") + p.name;
+  // A job's address as a link that opens directions in the phone's maps app:
+  // Apple Maps on iPhones and iPads, Google Maps everywhere else.
+  const isAppleDevice = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  const mapsUrl = (address) => isAppleDevice()
+    ? "https://maps.apple.com/?daddr=" + encodeURIComponent(address)
+    : "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(address);
+  const mapLink = (address, cls) => h("a", { class: "maplink" + (cls ? " " + cls : ""), href: mapsUrl(address), target: "_blank", rel: "noopener", title: "Directions in your maps app" }, address);
   const memberName = (id) => (team.members.find(m => m.id === id) || {}).name;
   const initials = (name) => (name || "?").trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join("");
   const avatar = (name) => h("span", { class: "av", "aria-hidden": "true", title: name }, initials(name));
@@ -499,9 +542,9 @@
     return h("div", {},
       h("div", { class: "top" }, h("div", { class: "bar wide" },
         h("div", { class: "logo", "aria-label": "BuildFree" }, h("i"), h("span", { class: "name" }, "BuildFree")),
-        h("div", { class: "tabs" }, tab("jobs", "Jobs"), tab("clients", "Clients"), tab("team", "Team")),
+        h("div", { class: "tabs" }, tab("jobs", "Jobs"), tab("time", "Time"), tab("clients", "Clients"), tab("team", "Team")),
         h("button", { class: "tab", onclick: logout }, "Log out"))),
-      view === "jobs" ? jobsView() : h("main", {}, view === "team" ? teamView() : clientsView()));
+      view === "jobs" ? jobsView() : h("main", {}, view === "team" ? teamView() : view === "time" ? timeView() : clientsView()));
   }
 
   // The job list's filters: open (not complete), the open jobs I manage, all,
@@ -587,6 +630,7 @@
     return h("div", {},
       h("div", { class: "head" }, h("h1", {}, "Today")),
       h("p", { class: "sub" }, projects.length ? "Pick a job on the left, or work through your to-dos below." : canManage() ? "Create your first job to get started." : "No jobs yet. The office adds jobs, and they show up here."),
+      h("div", { class: "clockrow" }, clockCard()),
       h("div", { class: "grid2 home" },
         h("div", {},
           group("Past due", open.filter(t => t.dueDate && t.dueDate < t0), "late"),
@@ -636,12 +680,13 @@
         const todays = data.items.filter(i => i.startDate <= d && i.endDate >= d && (!off || i.startDate === d || i.endDate === d));
         return h("div", { class: "day" + (off ? " off" : "") + (d === t0 ? " today" : "") },
           h("div", { class: "dayhead" }, h("b", {}, fmtDate(d)), d === t0 && h("span", { class: "pill" }, "Today"), off && h("span", { class: "tag" }, off)),
-          todays.map(i => {
+          todays.flatMap(i => {
             const job = projects.find(p => p.id === i.projectId);
             const span = i.startDate === i.endDate || off ? "" : "Day " + workdaysBetween(i.startDate, d, cal) + " of " + workdaysBetween(i.startDate, i.endDate, cal);
-            return h("button", { class: "agitem" + (i.done ? " done" : ""), type: "button", onclick: () => job && selectJob(job.id) },
+            return [h("button", { class: "agitem" + (i.done ? " done" : ""), type: "button", onclick: () => job && selectJob(job.id) },
               h("div", {}, h("div", { class: "t" }, i.title, avatars(i.assigneeIds)),
-                h("div", { class: "sub" }, [job ? jobLabel(job) : "", span].filter(Boolean).join(" · "))));
+                h("div", { class: "sub" }, [job ? jobLabel(job) : "", span].filter(Boolean).join(" · ")))),
+              job && job.address && !i.done ? mapLink(job.address, "agmap") : null];
           }));
       }));
       if (!data.items.length) body.append(h("p", { class: "sub", style: "margin:8px 0 0" }, agendaMine ? "Nothing assigned to you this week." : "Nothing on the schedule this week."));
@@ -978,13 +1023,14 @@
       h("button", { class: "btn", type: "submit" }, "Add"));
 
     const managers = (p.managerIds || []).map(memberName).filter(Boolean);
+    const when = [p.startDate && "Start " + fmtDate(p.startDate), p.endDate && "End " + fmtDate(p.endDate)].filter(Boolean).join(" · ");
     return h("div", {},
       h("div", { class: "head" },
         h("div", {}, p.number != null && h("div", { class: "jobnum" }, "Job #" + p.number), h("h1", {}, p.name)),
         h("div", { class: "headtools" }, status,
           canManage() && h("button", { class: "btn ghost", onclick: () => projectDialog(p) }, "Edit job"),
-          canManage() && h("button", { class: "btn ghost", onclick: () => confirmDelete("Delete “" + p.name + "”? Its daily logs, photos and to-dos are deleted too. This can’t be undone.", "/api/projects/" + p.id, () => { selected = null; }) }, "Delete"))),
-      h("p", { class: "sub" }, [p.address, p.startDate && "Start " + fmtDate(p.startDate), p.endDate && "End " + fmtDate(p.endDate)].filter(Boolean).join(" · ") || "No address or dates yet"),
+          canManage() && h("button", { class: "btn ghost", onclick: () => confirmDelete("Delete “" + p.name + "”? Its daily logs, photos and to-dos are deleted too; time worked on it is kept. This can’t be undone.", "/api/projects/" + p.id, () => { selected = null; }) }, "Delete"))),
+      h("p", { class: "sub" }, p.address && mapLink(p.address), p.address && when ? " · " : null, when || (p.address ? null : "No address or dates yet")),
       h("div", { class: "people" },
         h("div", {}, h("span", { class: "label" }, "Client"),
           client ? h("div", { class: "chips" }, h("span", { class: "chip" }, avatar(client.name), client.name),
@@ -994,6 +1040,7 @@
         h("div", {}, h("span", { class: "label" }, "Project managers"),
           managers.length ? h("div", { class: "chips" }, managers.map(n => h("span", { class: "chip" }, avatar(n), n)))
           : h("span", { class: "sub" }, canManage() ? h("button", { class: "link", type: "button", onclick: () => projectDialog(p) }, "Add a project manager") : "None yet"))),
+      h("div", { class: "clockrow" }, clockCard(p)),
       h("div", { class: "grid2" },
         h("div", { class: "panel" }, h("h2", {}, "Daily logs"), logForm,
           logs.length ? logs.map(l => h("div", { class: "entry" },
@@ -1063,7 +1110,7 @@
               catch (ex) { err.textContent = ex.message; }
             } }, "Reset password"),
             owner && u.id !== me.id && h("button", { class: "link danger", onclick: () =>
-              confirmDelete("Remove " + u.name + " from the team? They can’t log in anymore. Their daily logs and photos stay.", "/api/team/" + u.id) }, "Remove"))))),
+              confirmDelete("Remove " + u.name + " from the team? They can’t log in anymore. Their daily logs, photos and time stay.", "/api/team/" + u.id) }, "Remove"))))),
       team.invites.length ? h("div", { class: "group" },
         h("h2", {}, "Waiting to join (" + team.invites.length + ")"),
         h("div", { class: "list" }, team.invites.map(i => h("div", { class: "row team" },
@@ -1257,5 +1304,6 @@
 </script>
 <script src="estimates.js"></script>
 <script src="invoices.js"></script>
+<script src="time.js"></script>
 </body>
 </html>
